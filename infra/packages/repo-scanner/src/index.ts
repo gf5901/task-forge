@@ -17,7 +17,7 @@ import {
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
-import { Resource } from "sst";
+import { resolveInstanceId } from "../../api/src/lib/ec2";
 
 const REGION = process.env.AWS_REGION ?? "us-west-2";
 const TABLE_NAME = process.env.DYNAMO_TABLE ?? "agent-tasks";
@@ -63,14 +63,10 @@ const VENV_PYTHON = `${WORK_DIR}/.venv/bin/python3`;
 const RUN_TASK_SCRIPT = `${WORK_DIR}/run_task.py`;
 const ssmClient = new SSMClient({ region: REGION });
 
-function getInstanceId(): string {
-  return process.env.EC2_INSTANCE_ID || (Resource as any).Ec2InstanceId?.value || "";
-}
-
 async function triggerRunner(taskId: string): Promise<void> {
-  const instanceId = getInstanceId();
+  const instanceId = await resolveInstanceId();
   if (!instanceId) {
-    console.warn("EC2_INSTANCE_ID not set — skipping runner trigger for %s", taskId);
+    console.warn("Could not resolve EC2 instance — skipping runner trigger for %s", taskId);
     return;
   }
   try {

@@ -26,10 +26,6 @@ declare module "sst" {
       "type": "sst.sst.Secret"
       "value": string
     }
-    "Ec2InstanceId": {
-      "type": "sst.sst.Secret"
-      "value": string
-    }
     "GitHubToken": {
       "type": "sst.sst.Secret"
       "value": string

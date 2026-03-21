@@ -42,8 +42,12 @@ export default $config({
     const authSecretKey = new sst.Secret("AuthSecretKey");
     const authEmail = new sst.Secret("AuthEmail");
     const authPassword = new sst.Secret("AuthPassword");
-    const ec2InstanceId = new sst.Secret("Ec2InstanceId");
     const gitHubToken = new sst.Secret("GitHubToken");
+
+    const ec2LookupPermission = {
+      actions: ["ec2:DescribeInstances"],
+      resources: ["*"],
+    };
 
     // -- DynamoDB --
     const table = new sst.aws.Dynamo("Tasks", {
@@ -136,12 +140,13 @@ export default $config({
         runtime: "nodejs22.x",
         timeout: "120 seconds",
         memory: "256 MB",
-        link: [table, gitHubToken, ec2InstanceId],
+        link: [table, gitHubToken],
         permissions: [
           {
             actions: ["ssm:SendCommand"],
             resources: ["*"],
           },
+          ec2LookupPermission,
         ],
         environment: {
           DYNAMO_TABLE: tablePhysicalName,
@@ -158,12 +163,13 @@ export default $config({
         runtime: "nodejs22.x",
         timeout: "120 seconds",
         memory: "256 MB",
-        link: [table, ec2InstanceId],
+        link: [table],
         permissions: [
           {
             actions: ["ssm:SendCommand"],
             resources: ["*"],
           },
+          ec2LookupPermission,
         ],
         environment: {
           DYNAMO_TABLE: tablePhysicalName,
@@ -179,7 +185,7 @@ export default $config({
         runtime: "nodejs22.x",
         timeout: "60 seconds",
         memory: "128 MB",
-        link: [table, gitHubToken, ec2InstanceId],
+        link: [table, gitHubToken],
         environment: {
           DYNAMO_TABLE: tablePhysicalName,
           GITHUB_OWNER: githubOwner,
@@ -187,6 +193,13 @@ export default $config({
           ISSUE_LABEL: "agent",
           SCAN_CI: "true",
         },
+        permissions: [
+          {
+            actions: ["ssm:SendCommand"],
+            resources: ["*"],
+          },
+          ec2LookupPermission,
+        ],
       },
     });
 
@@ -210,7 +223,7 @@ export default $config({
       runtime: "nodejs22.x",
       timeout: "30 seconds",
       memory: "256 MB",
-      link: [table, authSecretKey, authEmail, authPassword, ec2InstanceId],
+      link: [table, authSecretKey, authEmail, authPassword],
       permissions: [
         {
           actions: ["ssm:SendCommand"],
@@ -220,6 +233,7 @@ export default $config({
           actions: ["bedrock:InvokeModel"],
           resources: ["*"],
         },
+        ec2LookupPermission,
       ],
       environment: {
         DYNAMO_TABLE: tablePhysicalName,

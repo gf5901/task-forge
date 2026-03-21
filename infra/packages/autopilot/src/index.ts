@@ -1,7 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
-import { Resource } from "sst";
+import { resolveInstanceId } from "../../api/src/lib/ec2";
 
 const TABLE = process.env.DYNAMO_TABLE ?? "agent-tasks";
 const REGION = process.env.AWS_REGION ?? "us-west-2";
@@ -13,14 +13,6 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), 
   marshallOptions: { removeUndefinedValues: true },
 });
 const ssm = new SSMClient({ region: REGION });
-
-function getInstanceId(): string {
-  return (
-    process.env.EC2_INSTANCE_ID ||
-    (Resource as { Ec2InstanceId?: { value: string } }).Ec2InstanceId?.value ||
-    ""
-  );
-}
 
 function shouldTriggerProposePlan(item: Record<string, unknown>): boolean {
   if (item.autopilot !== true || !item.project_id) return false;
@@ -60,9 +52,9 @@ async function listActiveAutopilotProjectIds(): Promise<string[]> {
 }
 
 async function triggerProposePlan(projectId: string): Promise<void> {
-  const instanceId = getInstanceId();
+  const instanceId = await resolveInstanceId();
   if (!instanceId) {
-    console.warn("No EC2_INSTANCE_ID — skipping autopilot plan trigger");
+    console.warn("Could not resolve EC2 instance — skipping autopilot plan trigger");
     return;
   }
   const esc = (s: string) => s.replace(/'/g, "'\\''");
