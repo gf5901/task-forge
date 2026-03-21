@@ -245,6 +245,7 @@ export async function createProject(data: {
   target_repo?: string
   status?: ProjectStatus
   autopilot?: boolean
+  autopilot_mode?: "daily" | "continuous"
 }) {
   return request<Project>("/projects", {
     method: "POST",
@@ -283,6 +284,8 @@ export async function patchProject(
     target_repo: string
     kpis: KPI[]
     autopilot: boolean
+    autopilot_mode: "daily" | "continuous"
+    cycle_max_hours: number
   }>,
 ) {
   return request<Project>(`/projects/${id}`, {
@@ -354,33 +357,59 @@ export async function fetchPlans(projectId: string, limit = 14) {
   return request<{ plans: DailyPlan[] }>(`/projects/${projectId}/plans?limit=${limit}`)
 }
 
-export async function fetchPlanDetail(projectId: string, dateStr: string) {
+export async function fetchPlanDetail(projectId: string, planId: string) {
   return request<{ plan: DailyPlan; tasks: Task[] }>(
-    `/projects/${projectId}/plans/${encodeURIComponent(dateStr)}`,
+    `/projects/${projectId}/plans/${encodeURIComponent(planId)}`,
   )
 }
 
 export async function patchPlanItems(
   projectId: string,
-  dateStr: string,
+  planId: string,
   body: { items: PlanItem[]; reflection?: string },
 ) {
-  return request<{ plan: DailyPlan }>(`/projects/${projectId}/plans/${encodeURIComponent(dateStr)}`, {
+  return request<{ plan: DailyPlan }>(`/projects/${projectId}/plans/${encodeURIComponent(planId)}`, {
     method: "PATCH",
     body: JSON.stringify(body),
   })
 }
 
-export async function approvePlan(projectId: string, dateStr: string, humanNotes = "") {
+export async function approvePlan(projectId: string, planId: string, humanNotes = "") {
   return request<{ ok: boolean; plan: DailyPlan; task_ids: string[] }>(
-    `/projects/${projectId}/plans/${encodeURIComponent(dateStr)}/approve`,
+    `/projects/${projectId}/plans/${encodeURIComponent(planId)}/approve`,
     { method: "POST", body: JSON.stringify({ human_notes: humanNotes }) },
   )
 }
 
-export async function regeneratePlan(projectId: string, dateStr: string) {
+export async function regeneratePlan(projectId: string, planId: string) {
   return request<{ ok: boolean }>(
-    `/projects/${projectId}/plans/${encodeURIComponent(dateStr)}/regenerate`,
+    `/projects/${projectId}/plans/${encodeURIComponent(planId)}/regenerate`,
     { method: "POST", body: JSON.stringify({}) },
   )
+}
+
+export async function startAutopilotCycle(projectId: string, maxHours?: number) {
+  return request<{ ok: boolean }>(`/projects/${projectId}/cycle/start`, {
+    method: "POST",
+    body: JSON.stringify(
+      maxHours != null && maxHours > 0 ? { max_hours: maxHours } : {},
+    ),
+  })
+}
+
+export async function stopAutopilotCycle(projectId: string) {
+  return request<{ ok: boolean }>(`/projects/${projectId}/cycle/stop`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  })
+}
+
+export async function reviewAutopilotCycle(
+  projectId: string,
+  opts: { feedback: string; restart?: boolean; max_hours?: number },
+) {
+  return request<{ ok: boolean }>(`/projects/${projectId}/cycle/review`, {
+    method: "POST",
+    body: JSON.stringify(opts),
+  })
 }

@@ -16,6 +16,7 @@ import {
   Sparkles,
   RotateCcw,
 } from "lucide-react"
+import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
@@ -38,8 +39,12 @@ import {
   generateProjectSpec,
   generateProjectKPIs,
   fetchPlanDetail,
+  fetchPlans,
   approvePlan,
   regeneratePlan,
+  startAutopilotCycle,
+  stopAutopilotCycle,
+  reviewAutopilotCycle,
 } from "@/lib/api"
 import type { Snapshot } from "@/lib/api"
 import type { Project, Directive, Task, TaskStatus, KPI, DailyPlan } from "@/lib/types"
@@ -186,7 +191,12 @@ export default function ProjectDetail() {
   const [planTasks, setPlanTasks] = useState<Task[]>([])
   const [planNotes, setPlanNotes] = useState("")
   const [planActionLoading, setPlanActionLoading] = useState(false)
-  const [planDateUtc, setPlanDateUtc] = useState("")
+  /** Plan id suffix (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS) for API calls */
+  const [focusedPlanId, setFocusedPlanId] = useState("")
+  const [recentPlans, setRecentPlans] = useState<DailyPlan[]>([])
+  const [cycleHoursDraft, setCycleHoursDraft] = useState("24")
+  const [reviewFeedback, setReviewFeedback] = useState("")
+  const [cycleActionLoading, setCycleActionLoading] = useState(false)
   /** When true, polling must not overwrite the spec textarea (draft). */
   const specEditingRef = useRef(false)
   useEffect(() => {
@@ -201,7 +211,6 @@ export default function ProjectDetail() {
       fetchSnapshots(projectId),
     ])
       .then(async ([d, s]) => {
-        setPlanDateUtc(today)
         setProject(d.project)
         setDirectives(d.directives)
         setTasks(d.tasks)
@@ -210,16 +219,44 @@ export default function ProjectDetail() {
           setDraftSpec(d.project.spec)
         }
         setSnapshots(s.snapshots)
+        const apMode = d.project.autopilot_mode ?? "daily"
         if (d.project.autopilot) {
-          try {
-            const pl = await fetchPlanDetail(projectId, today)
-            setTodayPlan(pl.plan)
-            setPlanTasks(pl.tasks)
-          } catch {
-            setTodayPlan(null)
-            setPlanTasks([])
+          if (apMode === "continuous") {
+            try {
+              const { plans } = await fetchPlans(projectId, 30)
+              setRecentPlans(plans)
+              const top = plans[0]
+              const suffix = top ? (top.sk ?? "").replace(/^PLAN#/, "") : ""
+              setFocusedPlanId(suffix)
+              if (suffix) {
+                const pl = await fetchPlanDetail(projectId, suffix)
+                setTodayPlan(pl.plan)
+                setPlanTasks(pl.tasks)
+              } else {
+                setTodayPlan(null)
+                setPlanTasks([])
+              }
+            } catch {
+              setRecentPlans([])
+              setFocusedPlanId("")
+              setTodayPlan(null)
+              setPlanTasks([])
+            }
+          } else {
+            setRecentPlans([])
+            setFocusedPlanId(today)
+            try {
+              const pl = await fetchPlanDetail(projectId, today)
+              setTodayPlan(pl.plan)
+              setPlanTasks(pl.tasks)
+            } catch {
+              setTodayPlan(null)
+              setPlanTasks([])
+            }
           }
         } else {
+          setRecentPlans([])
+          setFocusedPlanId("")
           setTodayPlan(null)
           setPlanTasks([])
         }
@@ -242,6 +279,24 @@ export default function ProjectDetail() {
     (todayPlan?.status === "approved" &&
       planTasks.some((t) => t.status === "pending" || t.status === "in_progress"))
 
+  const humanTasksOpen = useMemo(
+    () =>
+      tasks.filter(
+        (t) =>
+          t.assignee === "human" &&
+          t.status !== "completed" &&
+          t.status !== "cancelled",
+      ),
+    [tasks],
+  )
+
+  const cycleRunning = Boolean(
+    project?.autopilot &&
+      project.autopilot_mode === "continuous" &&
+      (project.cycle_started_at ?? "").trim() &&
+      !project.cycle_paused,
+  )
+
   useEffect(() => {
     if (!busy) return
     const id = window.setInterval(() => {
@@ -249,6 +304,12 @@ export default function ProjectDetail() {
     }, 3000)
     return () => window.clearInterval(id)
   }, [busy, load])
+
+  useEffect(() => {
+    if (project?.cycle_max_hours && project.cycle_max_hours > 0) {
+      setCycleHoursDraft(String(project.cycle_max_hours))
+    }
+  }, [project?.cycle_max_hours])
 
   async function saveSpec() {
     if (!projectId || !project) return
@@ -444,52 +505,299 @@ export default function ProjectDetail() {
         <ProposalQueue projectId={projectId} />
       )}
 
-      {/* Autopilot — daily plan */}
+      {/* Autopilot */}
       <section className="mb-10">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-[13px] font-medium uppercase tracking-wide text-zinc-500">
             Autopilot
           </h2>
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-zinc-400">
-            <input
-              type="checkbox"
-              checked={Boolean(project.autopilot)}
-              onChange={async (e) => {
-                if (!projectId) return
-                try {
-                  const p = await patchProject(projectId, { autopilot: e.target.checked })
-                  setProject(p)
-                  toast.success(e.target.checked ? "Autopilot enabled" : "Autopilot disabled")
-                  await load()
-                } catch (err) {
-                  toast.error(err instanceof Error ? err.message : "Update failed")
-                }
-              }}
-              className="rounded border-zinc-600 bg-zinc-900"
-            />
-            Daily plan (7 AM UTC) → approve → tasks run via poller
-          </label>
+          <div className="flex flex-wrap gap-1 rounded-md border border-zinc-800 bg-zinc-950/50 p-0.5">
+            {(
+              [
+                { key: "off", label: "Off" },
+                { key: "daily", label: "Daily" },
+                { key: "continuous", label: "Continuous" },
+              ] as const
+            ).map((tab) => {
+              const current = !project?.autopilot
+                ? "off"
+                : project.autopilot_mode === "continuous"
+                  ? "continuous"
+                  : "daily"
+              const active = current === tab.key
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  disabled={!projectId}
+                  className={`rounded px-2 py-1 text-[11px] font-medium ${
+                    active ? "bg-indigo-600 text-white" : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                  onClick={async () => {
+                    if (!projectId) return
+                    try {
+                      if (tab.key === "off") {
+                        const p = await patchProject(projectId, {
+                          autopilot: false,
+                          autopilot_mode: "daily",
+                        })
+                        setProject(p)
+                        toast.success("Autopilot off")
+                      } else {
+                        const p = await patchProject(projectId, {
+                          autopilot: true,
+                          autopilot_mode: tab.key,
+                        })
+                        setProject(p)
+                        toast.success(
+                          tab.key === "continuous" ? "Continuous mode" : "Daily mode",
+                        )
+                      }
+                      await load()
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : "Update failed")
+                    }
+                  }}
+                >
+                  {tab.label}
+                </button>
+              )
+            })}
+          </div>
         </div>
-        {project.autopilot && (
-          <div className="rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-4 py-3 space-y-3">
-            {!todayPlan ? (
+        <p className="mb-3 text-[12px] text-zinc-500">
+          {project?.autopilot && project.autopilot_mode === "continuous"
+            ? "While a cycle is running, the server may propose plans hourly and auto-start tasks. Pause for review when the window ends or work is blocked."
+            : project?.autopilot
+              ? "One proposed plan per calendar day at 07:00 UTC — approve to create tasks."
+              : "Choose Daily or Continuous to generate plans on a schedule."}
+        </p>
+
+        {humanTasksOpen.length > 0 && project?.autopilot_mode === "continuous" ? (
+          <div className="mb-3 rounded-md border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-200/90">
+            {humanTasksOpen.length} human-assigned task(s) open — autopilot may pause until they are
+            cleared or the agent can work in parallel.
+          </div>
+        ) : null}
+
+        {project?.autopilot && project.autopilot_mode === "continuous" ? (
+          <div className="mb-4 space-y-3 rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-4 py-3">
+            <div className="flex flex-wrap items-end gap-2">
+              <div>
+                <span className="mb-1 block text-[11px] text-zinc-500">Cycle max hours</span>
+                <Input
+                  type="number"
+                  min={1}
+                  value={cycleHoursDraft}
+                  onChange={(e) => setCycleHoursDraft(e.target.value)}
+                  className="h-8 w-24 border-zinc-800 bg-zinc-950/50 text-[12px]"
+                />
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {[24, 48, 168].map((h) => (
+                  <Button
+                    key={h}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 border-zinc-700 text-[11px]"
+                    onClick={() => setCycleHoursDraft(String(h))}
+                  >
+                    {h === 168 ? "1wk" : `${h}h`}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            {project.cycle_paused ? (
+              <div className="space-y-2">
+                <Badge variant="outline" className="border-zinc-600 text-zinc-300">
+                  Paused
+                  {project.cycle_pause_reason
+                    ? ` · ${project.cycle_pause_reason.replace(/_/g, " ")}`
+                    : ""}
+                </Badge>
+                {project.next_check_at ? (
+                  <p className="text-[11px] text-zinc-500">
+                    Next planner check:{" "}
+                    <span className="font-mono text-zinc-400">{project.next_check_at}</span>
+                  </p>
+                ) : null}
+                <Textarea
+                  value={reviewFeedback}
+                  onChange={(e) => setReviewFeedback(e.target.value)}
+                  placeholder="Feedback for the next planning pass…"
+                  rows={3}
+                  className="border-zinc-800 bg-zinc-950/50 text-[13px]"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-zinc-700"
+                    disabled={cycleActionLoading || !projectId}
+                    onClick={async () => {
+                      if (!projectId) return
+                      setCycleActionLoading(true)
+                      try {
+                        await reviewAutopilotCycle(projectId, {
+                          feedback: reviewFeedback,
+                          restart: false,
+                        })
+                        toast.success("Feedback saved")
+                        await load()
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : "Failed")
+                      } finally {
+                        setCycleActionLoading(false)
+                      }
+                    }}
+                  >
+                    Save feedback
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={cycleActionLoading || !projectId}
+                    onClick={async () => {
+                      if (!projectId) return
+                      setCycleActionLoading(true)
+                      try {
+                        const h = Math.max(1, parseInt(cycleHoursDraft, 10) || 24)
+                        await reviewAutopilotCycle(projectId, {
+                          feedback: reviewFeedback,
+                          restart: true,
+                          max_hours: h,
+                        })
+                        setReviewFeedback("")
+                        toast.success("Next cycle started")
+                        await load()
+                      } catch (e) {
+                        toast.error(e instanceof Error ? e.message : "Failed")
+                      } finally {
+                        setCycleActionLoading(false)
+                      }
+                    }}
+                  >
+                    Start next cycle
+                  </Button>
+                </div>
+              </div>
+            ) : cycleRunning ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-[12px] text-zinc-400">
+                  Cycle active — max {project.cycle_max_hours ?? 24}h wall clock.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-zinc-700"
+                  disabled={cycleActionLoading || !projectId}
+                  onClick={async () => {
+                    if (!projectId) return
+                    setCycleActionLoading(true)
+                    try {
+                      await stopAutopilotCycle(projectId)
+                      toast.success("Cycle stopped")
+                      await load()
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : "Failed")
+                    } finally {
+                      setCycleActionLoading(false)
+                    }
+                  }}
+                >
+                  Stop cycle
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-[12px] text-zinc-500">
+                  Start a timed cycle to enable hourly planning on the server.
+                </p>
+                <Button
+                  size="sm"
+                  disabled={cycleActionLoading || !projectId}
+                  onClick={async () => {
+                    if (!projectId) return
+                    setCycleActionLoading(true)
+                    try {
+                      const h = Math.max(1, parseInt(cycleHoursDraft, 10) || 24)
+                      await patchProject(projectId, { cycle_max_hours: h })
+                      await startAutopilotCycle(projectId, h)
+                      toast.success("Cycle started")
+                      await load()
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : "Failed")
+                    } finally {
+                      setCycleActionLoading(false)
+                    }
+                  }}
+                >
+                  Start cycle
+                </Button>
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        {project?.autopilot && recentPlans.length > 0 && project.autopilot_mode === "continuous" ? (
+          <div className="mb-3">
+            <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+              Recent plans
+            </p>
+            <ul className="flex flex-wrap gap-1.5">
+              {recentPlans.slice(0, 12).map((pl) => {
+                const id = (pl.sk ?? "").replace(/^PLAN#/, "")
+                const sel = id === focusedPlanId
+                return (
+                  <li key={pl.sk}>
+                    <button
+                      type="button"
+                      className={`rounded border px-2 py-0.5 font-mono text-[10px] ${
+                        sel
+                          ? "border-indigo-500 bg-indigo-500/10 text-indigo-200"
+                          : "border-zinc-700 text-zinc-400 hover:border-zinc-500"
+                      }`}
+                      onClick={async () => {
+                        if (!projectId || !id) return
+                        setFocusedPlanId(id)
+                        try {
+                          const detail = await fetchPlanDetail(projectId, id)
+                          setTodayPlan(detail.plan)
+                          setPlanTasks(detail.tasks)
+                        } catch {
+                          toast.error("Could not load plan")
+                        }
+                      }}
+                    >
+                      {pl.plan_date || id.slice(0, 10)} · {pl.status}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        ) : null}
+
+        {project?.autopilot && (
+          <div className="space-y-3 rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-4 py-3">
+            {!focusedPlanId || !todayPlan ? (
               <p className="text-[13px] text-zinc-500">
-                No plan for{" "}
-                <span className="font-mono text-zinc-400">
-                  {planDateUtc || new Date().toISOString().slice(0, 10)}
-                </span>{" "}
-                yet. The
-                proposal job runs at 7:00 UTC (after metrics). You can also add a directive anytime.
+                No plan loaded
+                {project.autopilot_mode === "continuous"
+                  ? " — start a cycle or wait for the hourly job."
+                  : " — the proposal runs at 07:00 UTC. You can add a directive anytime."}
               </p>
             ) : todayPlan.status === "completed" && todayPlan.items.length === 0 ? (
               <div className="space-y-2">
-                <p className="text-[12px] font-medium text-zinc-400">Nothing scheduled today</p>
+                <p className="text-[12px] font-medium text-zinc-400">Nothing scheduled</p>
+                <p className="font-mono text-[11px] text-zinc-600">{focusedPlanId}</p>
                 <div className="prose-custom text-[13px] text-zinc-300">
                   <Markdown>{todayPlan.reflection || "_No reflection._"}</Markdown>
                 </div>
               </div>
             ) : todayPlan.status === "proposed" ? (
               <div className="space-y-3">
+                <p className="font-mono text-[11px] text-zinc-600">{focusedPlanId}</p>
                 <div className="prose-custom text-[13px] text-zinc-400">
                   <Markdown>{todayPlan.reflection || "_Plan reflection._"}</Markdown>
                 </div>
@@ -505,69 +813,102 @@ export default function ProjectDetail() {
                         {it.role ? ` · ${it.role}` : ""}
                       </span>
                       {it.description ? (
-                        <p className="mt-1 text-[12px] text-zinc-500 whitespace-pre-wrap">
+                        <p className="mt-1 text-[12px] whitespace-pre-wrap text-zinc-500">
                           {it.description}
                         </p>
                       ) : null}
                     </li>
                   ))}
                 </ul>
-                <Textarea
-                  value={planNotes}
-                  onChange={(e) => setPlanNotes(e.target.value)}
-                  placeholder="Optional notes before approve…"
-                  rows={2}
-                  className="bg-zinc-950/50 border-zinc-800 text-[13px]"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    disabled={planActionLoading || todayPlan.items.length === 0}
-                    onClick={async () => {
-                      if (!projectId) return
-                      setPlanActionLoading(true)
-                      try {
-                        await approvePlan(projectId, planDateUtc, planNotes.trim())
-                        toast.success("Plan approved — tasks created")
-                        setPlanNotes("")
-                        await load()
-                      } catch (e) {
-                        toast.error(e instanceof Error ? e.message : "Approve failed")
-                      } finally {
-                        setPlanActionLoading(false)
-                      }
-                    }}
-                  >
-                    Approve plan
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="gap-1 border-zinc-700"
-                    disabled={planActionLoading}
-                    onClick={async () => {
-                      if (!projectId) return
-                      setPlanActionLoading(true)
-                      try {
-                        await regeneratePlan(projectId, planDateUtc)
-                        toast.success("Regeneration started on server — refresh in a minute")
-                        await load()
-                      } catch (e) {
-                        toast.error(e instanceof Error ? e.message : "Regenerate failed")
-                      } finally {
-                        setPlanActionLoading(false)
-                      }
-                    }}
-                  >
-                    <RotateCcw className="size-3.5" />
-                    Regenerate
-                  </Button>
-                </div>
+                {project.autopilot_mode !== "continuous" ? (
+                  <>
+                    <Textarea
+                      value={planNotes}
+                      onChange={(e) => setPlanNotes(e.target.value)}
+                      placeholder="Optional notes before approve…"
+                      rows={2}
+                      className="border-zinc-800 bg-zinc-950/50 text-[13px]"
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        disabled={planActionLoading || todayPlan.items.length === 0}
+                        onClick={async () => {
+                          if (!projectId) return
+                          setPlanActionLoading(true)
+                          try {
+                            await approvePlan(projectId, focusedPlanId, planNotes.trim())
+                            toast.success("Plan approved — tasks created")
+                            setPlanNotes("")
+                            await load()
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : "Approve failed")
+                          } finally {
+                            setPlanActionLoading(false)
+                          }
+                        }}
+                      >
+                        Approve plan
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="gap-1 border-zinc-700"
+                        disabled={planActionLoading}
+                        onClick={async () => {
+                          if (!projectId) return
+                          setPlanActionLoading(true)
+                          try {
+                            await regeneratePlan(projectId, focusedPlanId)
+                            toast.success("Regeneration started — refresh shortly")
+                            await load()
+                          } catch (e) {
+                            toast.error(e instanceof Error ? e.message : "Regenerate failed")
+                          } finally {
+                            setPlanActionLoading(false)
+                          }
+                        }}
+                      >
+                        <RotateCcw className="size-3.5" />
+                        Regenerate
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[12px] text-zinc-500">
+                      Continuous mode auto-approves new plans. Use Regenerate to re-propose.
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1 border-zinc-700"
+                      disabled={planActionLoading || !projectId}
+                      onClick={async () => {
+                        if (!projectId) return
+                        setPlanActionLoading(true)
+                        try {
+                          await regeneratePlan(projectId, focusedPlanId)
+                          toast.success("Regeneration started — refresh shortly")
+                          await load()
+                        } catch (e) {
+                          toast.error(e instanceof Error ? e.message : "Regenerate failed")
+                        } finally {
+                          setPlanActionLoading(false)
+                        }
+                      }}
+                    >
+                      <RotateCcw className="size-3.5" />
+                      Regenerate
+                    </Button>
+                  </div>
+                )}
               </div>
             ) : todayPlan.status === "approved" ? (
               <div className="space-y-2">
+                <p className="font-mono text-[11px] text-zinc-600">{focusedPlanId}</p>
                 <p className="text-[12px] text-zinc-500">
-                  Plan approved — tasks run through the normal pipeline (poller).
+                  Plan approved — tasks run through the poller.
                 </p>
                 <ul className="space-y-1.5">
                   {planTasks.map((t) => (
@@ -585,7 +926,8 @@ export default function ProjectDetail() {
               </div>
             ) : (
               <div className="space-y-2">
-                <p className="text-[12px] font-medium text-emerald-500/90">Day plan completed</p>
+                <p className="font-mono text-[11px] text-zinc-600">{focusedPlanId}</p>
+                <p className="text-[12px] font-medium text-emerald-500/90">Plan batch completed</p>
                 {todayPlan.outcome_summary && (
                   <p className="font-mono text-[12px] text-zinc-500">
                     {Object.entries(todayPlan.outcome_summary)

@@ -19,7 +19,7 @@ There is no bare `python` or `python3` in `$PATH` that has project dependencies.
 
 ## Architecture
 - `frontend/` — React SPA (Vite + TypeScript + Tailwind + shadcn/ui)
-- `infra/` — SST IaC: DynamoDB table, Hono API Lambda (TypeScript), Watchdog Lambda, Digest Lambda (daily cron → Discord), Autopilot Lambda (daily plan proposal)
+- `infra/` — SST IaC: DynamoDB table, Hono API Lambda (TypeScript), Watchdog Lambda, Digest Lambda (daily cron → Discord), Autopilot Lambda (hourly tick; daily-mode projects filtered to 07 UTC)
 - `src/web.py` — FastAPI backend: JSON API + SPA serving (EC2, being replaced by Lambda API)
 - `src/bot.py` — Discord bot with slash commands (discord.py)
 - `src/task_store.py` — Shared task types (`Task`, enums, `Comment`)
@@ -35,7 +35,7 @@ There is no bare `python` or `python3` in `$PATH` that has project dependencies.
 - `run_task.py` — Runner entry point (runs a single task or reply)
 - `run_task.py --directive <project_id> <directive_sk>` — Directive decomposition entry point (called by SSM)
 - `run_task.py --daily-cycle <project_id>` — Daily observe/reflect/propose cycle entry point (called by Metrics Lambda via SSM)
-- `run_task.py --propose-plan <project_id> [--regenerate]` — Autopilot plan proposal entry point (called by Autopilot Lambda via SSM)
+- `run_task.py --propose-plan <project_id> [--regenerate] [--plan-suffix <id>]` — Autopilot plan proposal entry point (called by Autopilot Lambda via SSM; `plan-suffix` for regenerating a specific `PLAN#` row in continuous mode)
 - `run_poller.py` — Polling daemon: checks DynamoDB every `POLL_INTERVAL` seconds for pending tasks and reply-pending comments, spawns `run_task.py` subprocesses (systemd service)
 - `run_heartbeat.py` — Heartbeat dispatcher entry point (called by cron)
 
@@ -141,7 +141,7 @@ Projects are long-lived entities (`pk=PROJECT#<id>`, `sk=PROJECT`) with a title,
 - `project-list-index` (`proj_status`, `project_updated`) — list projects by status
 
 ### Hono project routes (`infra/packages/api/src/routes/projects.ts`)
-`GET /api/projects`, `GET /api/projects/:id`, `POST /api/projects`, `PATCH /api/projects/:id`, `DELETE /api/projects/:id`, `POST /api/projects/:id/directive`, `GET /api/projects/:id/snapshots`, `GET /api/projects/:id/proposals`, `PATCH /api/projects/:id/proposals/:propSk`, `GET /api/projects/:id/requests`, `PATCH /api/projects/:id/requests/:reqSk`, `GET /api/projects/:id/plans`, `GET /api/projects/:id/plans/:date`, `PATCH /api/projects/:id/plans/:date`, `POST /api/projects/:id/plans/:date/approve`, `POST /api/projects/:id/plans/:date/regenerate`
+`GET /api/projects`, `GET /api/projects/:id`, `POST /api/projects`, `PATCH /api/projects/:id`, `DELETE /api/projects/:id`, `POST /api/projects/:id/directive`, `GET /api/projects/:id/snapshots`, `GET /api/projects/:id/proposals`, `PATCH /api/projects/:id/proposals/:propSk`, `GET /api/projects/:id/requests`, `PATCH /api/projects/:id/requests/:reqSk`, `GET /api/projects/:id/plans`, `GET /api/projects/:id/plans/:planId`, `PATCH /api/projects/:id/plans/:planId`, `POST /api/projects/:id/plans/:planId/approve`, `POST /api/projects/:id/plans/:planId/regenerate`, `POST /api/projects/:id/cycle/start`, `POST /api/projects/:id/cycle/stop`, `POST /api/projects/:id/cycle/review`
 
 ### Digest Lambda
 `infra/packages/digest/` — scheduled Lambda (cron `0 14 * * ? *`) posts a daily summary of task activity and project progress to Discord via webhook. Includes KPI briefings, reflections, and pending proposals for projects with KPIs.
@@ -150,7 +150,7 @@ Projects are long-lived entities (`pk=PROJECT#<id>`, `sk=PROJECT`) with a title,
 `infra/packages/metrics/` — scheduled Lambda (cron `0 6 * * ? *`) fetches metrics for active projects with KPIs. Adapters: PageSpeed Insights (free, no auth), GitHub (existing token). Writes `SNAPSHOT#<date>` records to DynamoDB, updates KPI current values, triggers `run_daily_cycle` on EC2 via SSM.
 
 ### Autopilot Lambda
-`infra/packages/autopilot/` — scheduled Lambda (cron `0 7 * * ? *`, 7 AM UTC — after metrics/daily cycle) queries active projects with `autopilot: true` and triggers `run_task.py --propose-plan` for each on EC2 via SSM.
+`infra/packages/autopilot/` — scheduled Lambda (cron hourly) queries active projects with `autopilot: true`. **Continuous** mode (`autopilot_mode: continuous`, not `cycle_paused`): triggers `run_task.py --propose-plan` on EC2. **Daily** mode: triggers only at **07:00 UTC** (same hourly cron; filtered in Lambda). EC2 `src/autopilot.py` enforces the same rules.
 
 ### Autonomous Daily Cycle
 Projects can define KPIs (`kpis` array on the PROJECT record). When KPIs are present, the Metrics Lambda collects data daily and triggers `run_daily_cycle()` in `src/objectives.py` on EC2. The cycle: loads 14 days of snapshots + proposals + recent tasks + human tasks in review → calls the agent (opus) with a reflection prompt → parses structured JSON → creates PROP records (proposals) and `assignee: "human"` tasks. The agent also reviews human tasks marked `in_review`, either completing them or returning them to `pending` with a comment.
@@ -162,9 +162,13 @@ DynamoDB record types under `PROJECT#<id>`: `PROJECT`, `DIR#<iso>`, `SNAPSHOT#<d
 See `docs/autonomous-objectives.md` for the full design vision and `docs/autonomous-objectives-setup.md` for human setup steps.
 
 ### Project Autopilot
-Projects with `autopilot: true` get a daily plan proposal at 7 AM UTC (after metrics/daily cycle at 6 AM). The Autopilot Lambda (`infra/packages/autopilot/`) queries active autopilot projects and triggers `run_task.py --propose-plan <project_id>` on EC2 via SSM. `src/autopilot.py` loads project context (spec, recent tasks, approved proposals, prior plan outcomes) and calls the agent (opus) to propose 3–6 work items. Plans are stored as `PLAN#<YYYY-MM-DD>` records with `status=proposed`.
+Projects with `autopilot: true` use `autopilot_mode`: **`daily`** (default) or **`continuous`**.
 
-**Plan lifecycle**: proposed → human reviews/edits in UI → approved (creates tasks with `directive_sk=PLAN#<date>`) → batch runs via poller → completed (outcome summary tracked). If a human sends a directive mid-day, pending plan tasks are auto-cancelled. Stale proposed plans from prior days block new proposals until approved or regenerated. The `--regenerate` flag allows re-proposing today's plan.
+- **Daily**: Plan proposal at **07:00 UTC** (Lambda + EC2 guard). One `PLAN#YYYY-MM-DD` per day; human approves in UI; tasks use `directive_sk=PLAN#…`. Stale proposed plans from prior days block new proposals until handled. `--regenerate` re-proposes today’s plan (`--plan-suffix` for a specific id in continuous).
+
+- **Continuous**: Human starts a **cycle** via API (`cycle_started_at`, `cycle_max_hours`). Hourly Lambda tick; EC2 may auto-approve plans, create tasks immediately, and use `PLAN#YYYY-MM-DDTHH:MM:SS` keys. Pauses when the time window expires, failure streak triggers, fully blocked on human tasks, or manual stop — Discord webhook + UI. `next_check_hours` / `next_check_at` defer planner calls when the agent returns empty items.
+
+**Plan lifecycle**: proposed → (daily: human approve | continuous: auto-approve) → tasks with `directive_sk=PLAN#…` → poller → batch completed. Directives cancel pending `PLAN#` tasks. Stale daily proposed plans block as before.
 
 Autopilot coexists with directives and the autonomous objectives (KPI) cycle. The daily cycle's proposals and human task outcomes feed into the autopilot's context. Directives take priority — issuing a directive cancels any pending plan tasks.
 

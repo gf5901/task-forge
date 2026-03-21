@@ -84,6 +84,8 @@ projects.post("/projects", async (c) => {
   if (!PROJECT_STATUSES.has(status)) {
     return c.json({ error: "invalid status" }, 400);
   }
+  const autopilotMode =
+    body.autopilot_mode === "continuous" ? "continuous" : "daily";
   const project = await db.createProject({
     title: body.title.trim(),
     spec: (body.spec ?? "").trim(),
@@ -92,6 +94,7 @@ projects.post("/projects", async (c) => {
     status,
     kpis: Array.isArray(body.kpis) ? body.kpis : [],
     autopilot: Boolean(body.autopilot),
+    autopilot_mode: autopilotMode,
   });
   return c.json(project);
 });
@@ -157,6 +160,20 @@ projects.patch("/projects/:id", async (c) => {
   if (body.target_repo !== undefined) updates.target_repo = body.target_repo;
   if (Array.isArray(body.kpis)) updates.kpis = body.kpis;
   if (body.autopilot !== undefined) updates.autopilot = Boolean(body.autopilot);
+  if (body.autopilot_mode !== undefined) {
+    updates.autopilot_mode =
+      body.autopilot_mode === "continuous" ? "continuous" : "daily";
+    if (body.autopilot_mode !== "continuous") {
+      updates.cycle_started_at = "";
+      updates.cycle_paused = false;
+      updates.cycle_pause_reason = "";
+      updates.next_check_at = "";
+    }
+  }
+  if (body.cycle_max_hours !== undefined) {
+    const n = Number(body.cycle_max_hours);
+    if (Number.isFinite(n) && n > 0) updates.cycle_max_hours = Math.floor(n);
+  }
 
   const p = await db.updateProject(c.req.param("id"), updates);
   if (!p) return c.json({ error: "not found" }, 404);
@@ -266,12 +283,8 @@ projects.patch("/projects/:id/proposals/:propSk", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Autopilot daily plans (PLAN#YYYY-MM-DD)
+// Autopilot plans (PLAN#YYYY-MM-DD or PLAN#YYYY-MM-DDTHH:MM:SS)
 // ---------------------------------------------------------------------------
-
-function isIsoDate(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
-}
 
 // GET /projects/:id/plans
 projects.get("/projects/:id/plans", async (c) => {
@@ -282,16 +295,16 @@ projects.get("/projects/:id/plans", async (c) => {
   return c.json({ plans });
 });
 
-// GET /projects/:id/plans/:date — date = YYYY-MM-DD
-projects.get("/projects/:id/plans/:date", async (c) => {
+// GET /projects/:id/plans/:planId — planId = YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (UTC)
+projects.get("/projects/:id/plans/:planId", async (c) => {
   const projectId = c.req.param("id");
-  const dateStr = decodeURIComponent(c.req.param("date"));
-  if (!isIsoDate(dateStr)) {
-    return c.json({ error: "invalid date (use YYYY-MM-DD)" }, 400);
+  const planId = decodeURIComponent(c.req.param("planId"));
+  if (!db.isValidPlanId(planId)) {
+    return c.json({ error: "invalid plan id" }, 400);
   }
   const p = await db.getProject(projectId);
   if (!p) return c.json({ error: "not found" }, 404);
-  const plan = await db.getPlan(projectId, dateStr);
+  const plan = await db.getPlan(projectId, planId);
   if (!plan) return c.json({ error: "plan not found" }, 404);
   const tasks = await Promise.all(
     plan.task_ids.map((tid) => db.getTask(tid)),
@@ -302,12 +315,12 @@ projects.get("/projects/:id/plans/:date", async (c) => {
   });
 });
 
-// PATCH /projects/:id/plans/:date — edit items before approve
-projects.patch("/projects/:id/plans/:date", async (c) => {
+// PATCH /projects/:id/plans/:planId — edit items before approve
+projects.patch("/projects/:id/plans/:planId", async (c) => {
   const projectId = c.req.param("id");
-  const dateStr = decodeURIComponent(c.req.param("date"));
-  if (!isIsoDate(dateStr)) {
-    return c.json({ error: "invalid date (use YYYY-MM-DD)" }, 400);
+  const planId = decodeURIComponent(c.req.param("planId"));
+  if (!db.isValidPlanId(planId)) {
+    return c.json({ error: "invalid plan id" }, 400);
   }
   const p = await db.getProject(projectId);
   if (!p) return c.json({ error: "not found" }, 404);
@@ -337,19 +350,19 @@ projects.patch("/projects/:id/plans/:date", async (c) => {
   }
   const reflection =
     typeof body.reflection === "string" ? body.reflection : undefined;
-  const updated = await db.updatePlanItems(projectId, dateStr, items, reflection);
+  const updated = await db.updatePlanItems(projectId, planId, items, reflection);
   if (!updated) {
     return c.json({ error: "plan not found or not editable" }, 400);
   }
   return c.json({ plan: updated });
 });
 
-// POST /projects/:id/plans/:date/approve
-projects.post("/projects/:id/plans/:date/approve", async (c) => {
+// POST /projects/:id/plans/:planId/approve
+projects.post("/projects/:id/plans/:planId/approve", async (c) => {
   const projectId = c.req.param("id");
-  const dateStr = decodeURIComponent(c.req.param("date"));
-  if (!isIsoDate(dateStr)) {
-    return c.json({ error: "invalid date (use YYYY-MM-DD)" }, 400);
+  const planId = decodeURIComponent(c.req.param("planId"));
+  if (!db.isValidPlanId(planId)) {
+    return c.json({ error: "invalid plan id" }, 400);
   }
   const p = await db.getProject(projectId);
   if (!p) return c.json({ error: "not found" }, 404);
@@ -361,7 +374,7 @@ projects.post("/projects/:id/plans/:date/approve", async (c) => {
     typeof body.human_notes === "string" ? body.human_notes : "";
   const result = await db.approvePlanAndCreateTasks(
     projectId,
-    dateStr,
+    planId,
     humanNotes,
     p,
   );
@@ -374,12 +387,12 @@ projects.post("/projects/:id/plans/:date/approve", async (c) => {
   return c.json({ ok: true, plan: result.plan, task_ids: result.tasks.map((t) => t.id) });
 });
 
-// POST /projects/:id/plans/:date/regenerate
-projects.post("/projects/:id/plans/:date/regenerate", async (c) => {
+// POST /projects/:id/plans/:planId/regenerate
+projects.post("/projects/:id/plans/:planId/regenerate", async (c) => {
   const projectId = c.req.param("id");
-  const dateStr = decodeURIComponent(c.req.param("date"));
-  if (!isIsoDate(dateStr)) {
-    return c.json({ error: "invalid date (use YYYY-MM-DD)" }, 400);
+  const planId = decodeURIComponent(c.req.param("planId"));
+  if (!db.isValidPlanId(planId)) {
+    return c.json({ error: "invalid plan id" }, 400);
   }
   const p = await db.getProject(projectId);
   if (!p) return c.json({ error: "not found" }, 404);
@@ -387,20 +400,117 @@ projects.post("/projects/:id/plans/:date/regenerate", async (c) => {
     return c.json({ error: "autopilot is not enabled for this project" }, 400);
   }
   const today = new Date().toISOString().slice(0, 10);
-  if (dateStr !== today) {
-    return c.json({ error: "can only regenerate today's plan" }, 400);
+  if (p.autopilot_mode !== "continuous" && planId !== today) {
+    return c.json(
+      { error: "daily mode can only regenerate today's plan (YYYY-MM-DD)" },
+      400,
+    );
   }
-  const plan = await db.getPlan(projectId, dateStr);
+  const plan = await db.getPlan(projectId, planId);
   if (!plan || plan.status !== "proposed") {
     return c.json({ error: "no proposed plan to regenerate" }, 400);
   }
   try {
-    await triggerProposePlan(projectId, true);
+    await triggerProposePlan(projectId, true, planId);
   } catch (e) {
     if (e instanceof RunnerUnavailableError) {
       return c.json({ error: e.message }, 503);
     }
     throw e;
+  }
+  return c.json({ ok: true });
+});
+
+// POST /projects/:id/cycle/start — continuous autopilot only
+projects.post("/projects/:id/cycle/start", async (c) => {
+  const projectId = c.req.param("id");
+  const p = await db.getProject(projectId);
+  if (!p) return c.json({ error: "not found" }, 404);
+  if (p.autopilot_mode !== "continuous") {
+    return c.json({ error: "cycle controls require autopilot_mode continuous" }, 400);
+  }
+  if (!p.autopilot) {
+    return c.json({ error: "enable autopilot first" }, 400);
+  }
+  if (p.status !== "active") {
+    return c.json({ error: "project is not active" }, 400);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const maxHours =
+    typeof body.max_hours === "number" &&
+    Number.isFinite(body.max_hours) &&
+    body.max_hours > 0
+      ? Math.floor(body.max_hours)
+      : p.cycle_max_hours || 24;
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00");
+  await db.updateProject(projectId, {
+    cycle_started_at: now,
+    cycle_paused: false,
+    cycle_pause_reason: "",
+    cycle_max_hours: maxHours,
+    next_check_at: "",
+  });
+  try {
+    await triggerProposePlan(projectId, false, undefined);
+  } catch (e) {
+    if (e instanceof RunnerUnavailableError) {
+      return c.json({ error: e.message }, 503);
+    }
+    throw e;
+  }
+  return c.json({ ok: true });
+});
+
+// POST /projects/:id/cycle/stop
+projects.post("/projects/:id/cycle/stop", async (c) => {
+  const projectId = c.req.param("id");
+  const p = await db.getProject(projectId);
+  if (!p) return c.json({ error: "not found" }, 404);
+  if (p.autopilot_mode !== "continuous") {
+    return c.json({ error: "cycle controls require autopilot_mode continuous" }, 400);
+  }
+  await db.updateProject(projectId, {
+    cycle_paused: true,
+    cycle_pause_reason: "manual",
+  });
+  return c.json({ ok: true });
+});
+
+// POST /projects/:id/cycle/review — optional feedback + restart
+projects.post("/projects/:id/cycle/review", async (c) => {
+  const projectId = c.req.param("id");
+  const p = await db.getProject(projectId);
+  if (!p) return c.json({ error: "not found" }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const feedback =
+    typeof body.feedback === "string" ? body.feedback.trim() : "";
+  const restart = Boolean(body.restart);
+  const maxHours =
+    typeof body.max_hours === "number" &&
+    Number.isFinite(body.max_hours) &&
+    body.max_hours > 0
+      ? Math.floor(body.max_hours)
+      : p.cycle_max_hours || 24;
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00");
+  if (restart) {
+    await db.updateProject(projectId, {
+      cycle_feedback: feedback,
+      cycle_started_at: now,
+      cycle_paused: false,
+      cycle_pause_reason: "",
+      cycle_max_hours: maxHours,
+      next_check_at: "",
+    });
+    try {
+      await triggerProposePlan(projectId, false, undefined);
+    } catch (e) {
+      if (e instanceof RunnerUnavailableError) {
+        return c.json({ error: e.message }, 503);
+      }
+      throw e;
+    }
+  } else {
+    await db.updateProject(projectId, { cycle_feedback: feedback });
   }
   return c.json({ ok: true });
 });

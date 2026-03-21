@@ -52,6 +52,34 @@ def update_project(
         names["#ap"] = "autopilot"
         vals[":ap"] = bool(updates["autopilot"])
         sets.append("#ap = :ap")
+    if "autopilot_mode" in updates:
+        names["#am"] = "autopilot_mode"
+        vals[":am"] = str(updates["autopilot_mode"] or "daily")
+        sets.append("#am = :am")
+    if "cycle_started_at" in updates:
+        names["#cs"] = "cycle_started_at"
+        vals[":cs"] = updates["cycle_started_at"]
+        sets.append("#cs = :cs")
+    if "cycle_max_hours" in updates:
+        names["#cmh"] = "cycle_max_hours"
+        vals[":cmh"] = int(updates["cycle_max_hours"])
+        sets.append("#cmh = :cmh")
+    if "cycle_paused" in updates:
+        names["#cp"] = "cycle_paused"
+        vals[":cp"] = bool(updates["cycle_paused"])
+        sets.append("#cp = :cp")
+    if "cycle_pause_reason" in updates:
+        names["#cpr"] = "cycle_pause_reason"
+        vals[":cpr"] = updates["cycle_pause_reason"]
+        sets.append("#cpr = :cpr")
+    if "cycle_feedback" in updates:
+        names["#cf"] = "cycle_feedback"
+        vals[":cf"] = str(updates["cycle_feedback"] or "")
+        sets.append("#cf = :cf")
+    if "next_check_at" in updates:
+        names["#nc"] = "next_check_at"
+        vals[":nc"] = updates["next_check_at"]
+        sets.append("#nc = :nc")
     table.update_item(
         Key={"pk": _pk(project_id), "sk": "PROJECT"},
         UpdateExpression="SET %s" % ", ".join(sets),
@@ -322,18 +350,31 @@ def put_memory(
 
 
 # ---------------------------------------------------------------------------
-# Daily autopilot plans (sk=PLAN#YYYY-MM-DD)
+# Autopilot plans (sk=PLAN#YYYY-MM-DD legacy, or PLAN#YYYY-MM-DDTHH:MM:SS UTC)
 # ---------------------------------------------------------------------------
 
 
-def plan_sk(date_str: str) -> str:
-    return "PLAN#%s" % date_str
+def plan_sk(plan_id_suffix: str) -> str:
+    """Sort key for a plan; *plan_id_suffix* is the part after ``PLAN#``."""
+    return "PLAN#%s" % plan_id_suffix
 
 
-def get_plan(project_id: str, date_str: str) -> Optional[Dict[str, Any]]:
+def plan_date_from_suffix(plan_id_suffix: str) -> str:
+    """Calendar YYYY-MM-DD for grouping/display (from suffix before ``T`` if present)."""
+    if "T" in plan_id_suffix:
+        return plan_id_suffix.split("T", 1)[0]
+    return plan_id_suffix[:10] if len(plan_id_suffix) >= 10 else plan_id_suffix
+
+
+def new_plan_suffix_utc() -> str:
+    """New continuous-plan sort key suffix (UTC, no timezone letter)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def get_plan(project_id: str, plan_id_suffix: str) -> Optional[Dict[str, Any]]:
     ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
     table = ddb.Table(TABLE_NAME)
-    resp = table.get_item(Key={"pk": _pk(project_id), "sk": plan_sk(date_str)})
+    resp = table.get_item(Key={"pk": _pk(project_id), "sk": plan_sk(plan_id_suffix)})
     return resp.get("Item")
 
 
@@ -349,15 +390,16 @@ def list_plans(project_id: str, limit: int = 14) -> List[Dict[str, Any]]:
     return resp.get("Items", [])
 
 
-def put_plan(project_id: str, date_str: str, record: Dict[str, Any]) -> None:
+def put_plan(project_id: str, plan_id_suffix: str, record: Dict[str, Any]) -> None:
     """Write or replace a PLAN# record (caller sets status, items, reflection, etc.)."""
     ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
     table = ddb.Table(TABLE_NAME)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    pd = record.get("plan_date") or plan_date_from_suffix(plan_id_suffix)
     item = {
         "pk": _pk(project_id),
-        "sk": plan_sk(date_str),
-        "plan_date": date_str,
+        "sk": plan_sk(plan_id_suffix),
+        "plan_date": pd,
         "updated_at": now,
         **record,
     }
@@ -366,7 +408,7 @@ def put_plan(project_id: str, date_str: str, record: Dict[str, Any]) -> None:
     table.put_item(Item=item)
 
 
-def update_plan_fields(project_id: str, date_str: str, fields: Dict[str, Any]) -> None:
+def update_plan_fields(project_id: str, plan_id_suffix: str, fields: Dict[str, Any]) -> None:
     """SET arbitrary scalar/list/map fields on a plan item."""
     if not fields:
         return
@@ -383,7 +425,7 @@ def update_plan_fields(project_id: str, date_str: str, fields: Dict[str, Any]) -
         vals[vk] = v
         sets.append("%s = %s" % (nk, vk))
     table.update_item(
-        Key={"pk": _pk(project_id), "sk": plan_sk(date_str)},
+        Key={"pk": _pk(project_id), "sk": plan_sk(plan_id_suffix)},
         UpdateExpression="SET %s" % ", ".join(sets),
         ExpressionAttributeNames=names,
         ExpressionAttributeValues=vals,
