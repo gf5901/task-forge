@@ -17,6 +17,7 @@
     "jose": "^6"
   },
   "devDependencies": {
+    "@aws-sdk/client-ec2": "^3.1014.0",
     "@eslint/js": "^9.39.4",
     "@types/aws-lambda": "^8",
     "@types/node": "^25.5.0",

@@ -1,16 +1,11 @@
 import { SSMClient, SendCommandCommand } from "@aws-sdk/client-ssm";
-import { Resource } from "sst";
+import { resolveInstanceId } from "./ec2";
 
-const REGION = process.env.AWS_REGION ?? "us-west-2";
 const WORK_DIR = process.env.EC2_WORK_DIR ?? "/home/ec2-user/workspace/task-forge";
 const VENV_PYTHON = `${WORK_DIR}/.venv/bin/python3`;
 const RUN_TASK_SCRIPT = `${WORK_DIR}/run_task.py`;
 
-const ssmClient = new SSMClient({ region: REGION });
-
-function getInstanceId(): string {
-  return process.env.EC2_INSTANCE_ID || (Resource as any).Ec2InstanceId?.value || "";
-}
+const ssmClient = new SSMClient({ region: process.env.AWS_REGION ?? "us-west-2" });
 
 /** Thrown when runner cannot be dispatched (e.g. EC2 instance ID not configured). */
 export class RunnerUnavailableError extends Error {
@@ -21,10 +16,10 @@ export class RunnerUnavailableError extends Error {
 }
 
 async function sendCommand(command: string): Promise<void> {
-  const instanceId = getInstanceId();
+  const instanceId = await resolveInstanceId();
   if (!instanceId) {
     throw new RunnerUnavailableError(
-      "EC2_INSTANCE_ID not set — runner dispatch unavailable"
+      "Could not resolve EC2 instance — check Role tag or EC2_INSTANCE_ID"
     );
   }
   await ssmClient.send(
