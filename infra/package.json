@@ -1,0 +1,16 @@
+{
+  "name": "task-forge-infra",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "sst dev",
+    "deploy": "sst deploy",
+    "remove": "sst remove"
+  },
+  "devDependencies": {
+    "sst": "^3",
+    "aws-cdk-lib": "2.171.1",
+    "constructs": "10.4.2",
+    "typescript": "^5"
+  }
+}

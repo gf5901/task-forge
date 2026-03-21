@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% set current_status = 'all' %}
+{% block title %}{{ task.title }}{% endblock %}
+{% block content %}
+<div class="detail">
+  {% if parent %}
+  <a class="back-link" href="/tasks/{{ parent.id }}">← Back to parent: {{ parent.title }}</a>
+  {% else %}
+  <a class="back-link" href="/tasks">← Back to tasks</a>
+  {% endif %}
+  <h1>{{ task.title }}</h1>
+
+  <div class="meta-grid">
+    <div class="meta-item">
+      <label>Status</label>
+      <div class="val"><span class="st st-{{ task.status.value }}">{% if task.status.value == 'completed' %}✓{% elif task.status.value == 'cancelled' %}–{% endif %}</span> {{ task.status.value | replace('_', ' ') | capitalize }}</div>
+    </div>
+    <div class="meta-item">
+      <label>Priority</label>
+      <div class="val"><span class="pr pr-{{ task.priority.value }}"><span></span><span></span><span></span><span></span></span> {{ task.priority.value | capitalize }}</div>
+    </div>
+    <div class="meta-item">
+      <label>ID</label>
+      <div class="val" style="font-family:monospace">{{ task.id }}</div>
+    </div>
+    <div class="meta-item">
+      <label>Created</label>
+      <div class="val">{{ task.created_at | timeago }}</div>
+    </div>
+    {% if task.created_by %}
+    <div class="meta-item">
+      <label>Created by</label>
+      <div class="val">{{ task.created_by }}</div>
+    </div>
+    {% endif %}
+    {% if task.target_repo %}
+    <div class="meta-item">
+      <label>Target repo</label>
+      <div class="val">{{ task.target_repo }}</div>
+    </div>
+    {% endif %}
+    {% if task.tags %}
+    <div class="meta-item">
+      <label>Tags</label>
+      <div class="val">{% for tag in task.tags %}<span class="tag">{{ tag }}</span>{% endfor %}</div>
+    </div>
+    {% endif %}
+    {% if pr_url %}
+    <div class="meta-item">
+      <label>Pull Request</label>
+      <div class="val"><a href="{{ pr_url }}" target="_blank" rel="noopener" class="pr-link">{{ pr_url.split('/')[-1] }} ↗</a></div>
+    </div>
+    {% endif %}
+    {% if task.model %}
+    <div class="meta-item">
+      <label>Model</label>
+      <div class="val">{{ task.model }}</div>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if description_html %}
+  <div class="section-label">Description</div>
+  <div class="description md-body">{{ description_html }}</div>
+  {% endif %}
+
+  {% if subtasks %}
+  <div class="section-label">Subtasks ({{ subtasks | length }})</div>
+  <div class="subtask-list">
+    {% for sub in subtasks %}
+    <a class="subtask-row" href="/tasks/{{ sub.id }}">
+      <span class="st st-{{ sub.status.value }}">{% if sub.status.value == 'completed' %}✓{% elif sub.status.value == 'cancelled' %}–{% endif %}</span>
+      <span class="subtask-title">{{ sub.title }}</span>
+      {% if sub.model %}<span class="subtask-model">{{ sub.model }}</span>{% endif %}
+      <span class="task-time">{{ sub.created_at | timeago }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if agent_output %}
+  <div class="section-label">Agent Output</div>
+  <div class="agent-output md-body">{{ agent_output }}</div>
+  {% endif %}
+
+  <div class="section-label">Comments{% if comments %} ({{ comments | length }}){% endif %}</div>
+  <div class="comments-list">
+    {% for c in comments %}
+    <div class="comment">
+      <div class="comment-meta">
+        <span class="comment-author">{{ c.author }}</span>
+        <span class="comment-time">{{ c.created_at | timeago }}</span>
+      </div>
+      <div class="comment-body md-body">{{ comment_bodies_html[loop.index0] }}</div>
+    </div>
+    {% else %}
+    <div class="comment-empty">No comments yet</div>
+    {% endfor %}
+  </div>
+  <form method="post" action="/tasks/{{ task.id }}/comment" class="comment-form" hx-boost="true">
+    <textarea name="body" placeholder="Add a comment…" required></textarea>
+    <button type="submit" class="btn-submit">Post Comment</button>
+  </form>
+
+  <div class="section-label">Actions</div>
+  <div class="actions">
+    {% if task.status.value == 'pending' %}
+    <form method="post" action="/tasks/{{ task.id }}/run" hx-boost="true">
+      <button type="submit" class="status-btn" style="border-color:var(--green);color:var(--green)">▶ Run Now</button>
+    </form>
+    {% endif %}
+    {% for s in statuses %}
+    <form method="post" action="/tasks/{{ task.id }}/status" style="display:inline" hx-boost="true">
+      <input type="hidden" name="status" value="{{ s }}">
+      <button type="submit" class="status-btn{% if task.status.value == s %} current{% endif %}">{{ s | replace('_', ' ') | capitalize }}</button>
+    </form>
+    {% endfor %}
+    <form method="post" action="/tasks/{{ task.id }}/delete" onsubmit="return confirm('Delete this task?')" hx-boost="true">
+      <button type="submit" class="btn-delete">Delete</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

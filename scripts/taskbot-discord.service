@@ -1,0 +1,22 @@
+[Unit]
+Description=Task Forge Discord Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/workspace/task-forge
+ExecStart=/bin/bash -c 'exec /home/ec2-user/workspace/task-forge/.venv/bin/python3 /home/ec2-user/workspace/task-forge/main.py'
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taskbot-discord
+Environment=PYTHONUNBUFFERED=1
+Environment="PATH=/home/ec2-user/.local/bin:/home/ec2-user/.local/share/pnpm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target

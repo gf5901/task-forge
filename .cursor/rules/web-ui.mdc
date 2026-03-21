@@ -1,0 +1,39 @@
+---
+description: React SPA design system, component patterns, and debugging for frontend/src/**
+globs: "frontend/src/**"
+alwaysApply: false
+---
+
+# Web UI — React SPA
+
+## Stack
+Vite + TypeScript + Tailwind CSS v4 + shadcn/ui + Lucide icons. No class-variance-authority patterns — use plain Tailwind. Build: `cd frontend && pnpm run build`.
+
+## Design System (Linear-inspired dark theme)
+- Background: zinc-950 base, zinc-900 sidebar/panels
+- Accent: indigo-500 (sidebar, agent badges, active states)
+- Status icons: circle (pending), spinner (in_progress), check (completed), x (cancelled)
+- Priority: colored bar indicators — red (urgent), orange (high), yellow (medium), grey (low)
+- Flat sections, no heavy card borders. Mobile-first responsive.
+
+## Component Patterns
+
+### Wrapper components must forward props to the inner component
+When a component destructures props (e.g. `{ children }`) and renders a third-party component inside, explicitly pass those props through. A self-closing tag like `<ReactMarkdown ... />` silently renders nothing — it must be `<ReactMarkdown ...>{children}</ReactMarkdown>`. TypeScript won't catch this because `children` is a valid prop on the outer function; it just never reaches the inner component.
+
+### Use Lucide icons, not emoji or Unicode symbols
+All iconography must use Lucide React components (`import { Play, Check, ... } from "lucide-react"`). Never use emoji (🔄, ✅) or Unicode symbols (▶, ✓, ⏱) in JSX — they render inconsistently across platforms and don't respect the design system's sizing/color tokens.
+
+## Debugging Blank UI Sections
+When content is missing from the UI, verify the API returns the expected data **before** investigating the frontend. Use the Python shell to call `task_store` methods directly — if the data is correct there, the bug is in the component or its children, not the backend.
+
+## File Roles
+- `Layout.tsx` — App shell: sidebar (desktop) + tab bar (mobile), FAB
+- `TaskList.tsx` — Task list with status icons, priority bars, tags, time ago
+- `TaskDetail.tsx` — Flat detail view: inline metadata, subtasks, markdown sections, comment avatars (indigo `Bot` icon for agent, letter avatar for users), reply-pending polling every 3s
+- `TaskCreate.tsx` — Create form: priority selector, plan-only toggle, target repo datalist
+- `ActivityLog.tsx` — Pipeline event log with Lucide icon map (`EVENT_ICON_MAP`), mobile-responsive
+- `Login.tsx` — Minimal sign-in form
+- `Markdown.tsx` — Shared renderer (`react-markdown` + `remark-gfm` + `remark-breaks`), dark-theme prose styles. `remark-breaks` converts single newlines to `<br>` so agent output line breaks are preserved. If you add a new remark/rehype plugin, install it via `npm install <pkg>` — missing packages cause `tsc` to fail with TS2307.
+- `api.ts` — Fetch client with `credentials: "include"`, auto-reloads on 401
+- `types.ts` — TypeScript interfaces: `Task`, `TaskDetail`, `Counts`, etc.

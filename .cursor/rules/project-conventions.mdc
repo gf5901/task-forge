@@ -1,0 +1,298 @@
+---
+description: Python conventions and architecture for the Task Forge project
+alwaysApply: true
+---
+
+# Task Forge Conventions
+
+## Python 3.9 Compatibility
+This runs on Amazon Linux 2023 with Python 3.9. Do not use:
+- `str | Path` union syntax — use `Union[str, Path]` from `typing`
+- `list[str]`, `dict[str, int]` — use `List[str]`, `Dict[str, int]` from `typing`
+- `match` statements — use `if/elif` chains
+
+## Python Interpreter
+There is no bare `python` or `python3` in `$PATH` that has project dependencies. Always use the venv interpreter directly:
+- **Scripts / nohup / cron**: `.venv/bin/python3 <script>`
+- **One-liners**: `<repo>/.venv/bin/python3 -c "..."` (on a typical EC2 layout: `/home/ec2-user/workspace/<repo>/.venv/bin/python3`)
+- Never rely on `source .venv/bin/activate` in non-interactive shells — it silently fails and leaves the system python active, which lacks all packages.
+
+## Architecture
+- `frontend/` — React SPA (Vite + TypeScript + Tailwind + shadcn/ui)
+- `infra/` — SST IaC: DynamoDB table, Hono API Lambda (TypeScript), Watchdog Lambda, Digest Lambda (daily cron → Discord), Autopilot Lambda (daily plan proposal)
+- `src/web.py` — FastAPI backend: JSON API + SPA serving (EC2, being replaced by Lambda API)
+- `src/bot.py` — Discord bot with slash commands (discord.py)
+- `src/task_store.py` — Shared task types (`Task`, enums, `Comment`)
+- `src/dynamo_store.py` — DynamoDB-backed task store (`DynamoTaskStore`)
+- `src/projects_dynamo.py` — DynamoDB helpers for project records (get/update project, directives, snapshots, proposals, daily plans)
+- `src/autopilot.py` — Daily autopilot plan proposal (`propose_daily_plan`); called via `run_task.py --propose-plan`
+- `src/pipeline.py` — Task orchestration: plan, execute, PR, cleanup; `run_directive()` for project directives
+- `src/objectives.py` — Daily autonomous cycle: observe metrics → reflect → propose actions; `run_daily_cycle()` for projects with KPIs
+- `src/agent.py` — Agent CLI execution, prompt building (includes project context injection)
+- `src/watcher.py` — Polls DynamoDB store for status changes, fires callbacks
+- `src/runner.py` — Task runner, invokes Cursor `agent -p --force` for pending tasks
+- `main.py` — Bot entry point
+- `run_task.py` — Runner entry point (runs a single task or reply)
+- `run_task.py --directive <project_id> <directive_sk>` — Directive decomposition entry point (called by SSM)
+- `run_task.py --daily-cycle <project_id>` — Daily observe/reflect/propose cycle entry point (called by Metrics Lambda via SSM)
+- `run_task.py --propose-plan <project_id> [--regenerate]` — Autopilot plan proposal entry point (called by Autopilot Lambda via SSM)
+- `run_poller.py` — Polling daemon: checks DynamoDB every `POLL_INTERVAL` seconds for pending tasks and reply-pending comments, spawns `run_task.py` subprocesses (systemd service)
+- `run_heartbeat.py` — Heartbeat dispatcher entry point (called by cron)
+
+## Task Record Format
+Tasks are stored in DynamoDB with the following fields:
+- Fields: `id`, `status`, `priority`, `created_at`, `updated_at`, `created_by`, `tags`, `parent_id`, `model`, `plan_only`, `reply_pending`, `role`, `project_id`, `directive_sk`, `directive_date`, `assignee`
+- Statuses: `pending`, `in_progress`, `in_review`, `completed`, `failed`, `cancelled`
+- Priorities: `low`, `medium`, `high`, `urgent`
+- Assignee: `agent` (default) or `human` — controls who is responsible for the task
+- Model tiers: `fast`, `default`, `full` — controls which LLM runs the task
+- `parent_id` links subtasks to their parent task
+- `plan_only: true` — skips execution; runner decomposes task into independent top-level pending tasks
+- Agent output is appended as `## Agent Output (timestamp)` sections
+- Comments are appended as `## Comment (timestamp) by author` sections
+- Plan results are appended as `## Plan (timestamp)` sections
+
+## Task Triggering
+A polling daemon (`run_poller.py`) runs on EC2 as a systemd service and checks DynamoDB every `POLL_INTERVAL` seconds (default 15) for pending tasks and `reply_pending` comments. It spawns `run_task.py` subprocesses to handle them — no SSM trigger from Lambda is needed. The Lambda API just writes to DynamoDB (e.g. sets status to `pending` or `reply_pending: true`) and returns. SSM is only used for `cancelRunner` (SIGTERM), directive decomposition, daily cycle triggers, and autopilot plan proposals.
+
+Up to `MAX_CONCURRENT_RUNNERS` (default 2) agents can run in parallel. Each process acquires a numbered slot lockfile (`runner.lock.0`, `runner.lock.1`, …); if all slots are occupied it exits cleanly. `run_one` claims a task by immediately flipping it to `in_progress` then re-reading to confirm it won any race — if another runner already claimed it, the process bails out.
+
+## Compound Pipeline
+The task runner (`src/runner.py`) uses a worktree-isolated compound pipeline:
+1. **Create worktree** — `git worktree add` from the default branch into `/tmp/task-worktrees/task-<id>`
+2. **Plan checklist** — fast model decomposes task into 2-5 steps, each assigned a `role` based on the work involved (controlled by `AUTO_PLAN`)
+3. **Execute (single session)** — all steps assembled into one checklist prompt, one agent call works through them all. Child task records created for UI visibility but not individually executed.
+4. **Update docs** — fast model updates documentation for changes (controlled by `AUTO_DOCS`)
+5. **Create PR** — commit changes in the worktree, push branch, open PR via `gh` CLI (controlled by `AUTO_PR`)
+6. **Cleanup** — remove worktree and local branch (always runs, even on failure)
+
+The main checkout is never disturbed. See `docs/compound-engineering.md` for details.
+
+### Plan-only mode
+When `plan_only: true` is set on a task, the runner short-circuits the pipeline: it calls the agent with `PLAN_ONLY_PROMPT` to decompose the task into 3–10 independent subtasks, creates each as a real top-level `pending` task (no `parent_id`), appends a Plan section to the parent, and marks the parent `completed`. Each subtask then runs independently with its own worktree and timeout. Use this for large tasks that would time out in a single agent session. The UI exposes this as a "Plan only — break into subtasks" toggle on the create form.
+
+## Roles
+`src/roles.py` defines 13 agent roles, each with an `id`, `label`, and a `prompt` injected into the agent context at execution time. Current roles: `fe_engineer`, `be_engineer`, `fullstack_engineer`, `product_designer`, `product_manager`, `devops_engineer`, `data_engineer`, `security_engineer`, `technical_writer`, `researcher`, `content_strategist`, `qa_engineer`, `architect`.
+
+Role assignment during planning: both `PLAN_PROMPT` and `PLAN_ONLY_PROMPT` include the full role list and instruct the planner to set a `role` field on each step. `create_subtasks()` and `run_plan_only()` pass the planner-assigned role to `store.create()`, falling back to the parent task's role if the planner omits one. To add a new role, append an entry to the `ROLES` list in `src/roles.py` — no other changes needed.
+
+## Comment-Triggered Agent Replies
+When a user posts a comment via `POST /api/tasks/{id}/comment`, the Lambda API sets `reply_pending: true` on the task in DynamoDB and returns. The EC2 poller (`run_poller.py`) detects `reply_pending` tasks every poll cycle and spawns `run_task.py --reply <task_id>`. `run_comment_reply` in `runner.py` clears `reply_pending` when done. The UI polls every 3s while `reply_pending` is true and shows a spinning "Agent is composing a reply…" indicator. Agent comments are styled in indigo with a bot icon. `POST /api/tasks/{id}/reply` still exists for manual triggering (sets `reply_pending: true`).
+
+## Human-Assigned Tasks
+Tasks with `assignee: "human"` are for the human operator (e.g., "set up GA4 property", "provide API key"). The daily cycle creates them automatically when the agent identifies something it needs from the human. Lifecycle:
+1. Daily cycle creates task with `assignee: "human"`, `status: "pending"`
+2. Human sees them in "My Tasks" sidebar filter and "Your Tasks" section on ProjectDetail
+3. Human does the work and sets status to `in_review`
+4. Next daily cycle reviews: if done correctly → `completed`; if not → `pending` with an agent comment explaining what's missing
+The EC2 poller ignores `assignee: "human"` tasks (they are not picked up for agent execution). The `human` count in the API counts endpoint includes all non-terminal human-assigned tasks.
+
+## Web UI — React SPA + API
+
+The frontend is a **React SPA** (Vite + TypeScript + Tailwind CSS v4 + shadcn/ui + Lucide icons). Two API backends exist:
+
+1. **Lambda API (Hono, TypeScript)** — `infra/packages/api/`, deployed via SST to API Gateway. JWT auth, DynamoDB-backed, login rate limiting. Triggers EC2 runners via SSM SendCommand. This is the target architecture.
+2. **EC2 FastAPI (Python)** — `src/web.py`, session-based auth, runs on EC2. Being phased out for `/api/*` routes; will remain for `/webhook/github` and `/api/health`.
+
+### Frontend (`frontend/`)
+- `frontend/src/components/Layout.tsx` — App shell: sidebar (desktop) with status nav + counts, always-visible tab bar (mobile), FAB for new task (shown only on the task list view)
+- `frontend/src/pages/TaskList.tsx` — Task list with status icons, priority bars, tags, time ago
+- `frontend/src/pages/TaskDetail.tsx` — Flat Linear-style detail view: inline metadata, subtasks, markdown-rendered description/agent output/comments; status changed via inline badge dropdown; Run and Delete actions in the title header row
+- `frontend/src/pages/TaskCreate.tsx` — Create task form with priority selector, plan-only toggle, role dropdown (fetches `GET /api/roles`), and target repo field (text input with datalist autocomplete of known repo names from `GET /api/repos`)
+- `frontend/src/pages/ProjectList.tsx` — Project list with status, task progress, last directive, target repo
+- `frontend/src/pages/ProjectCreate.tsx` — New project form: title, spec (markdown), priority, target repo, autopilot toggle
+- `frontend/src/pages/ProjectDetail.tsx` — Spec editor, progress bar, autopilot toggle + today's plan section, directive timeline, active tasks, directive composer; polls 3s while busy
+- `frontend/src/pages/Login.tsx` — Minimal sign-in form
+- `frontend/src/components/Markdown.tsx` — Shared markdown renderer (`react-markdown` + `remark-gfm` + `remark-breaks`) with dark-theme prose styles; `remark-breaks` preserves single newlines as `<br>` so agent output line breaks render correctly
+- `frontend/src/lib/api.ts` — Fetch-based API client with `credentials: "include"` for session cookies; auto-reloads on 401
+- `frontend/src/lib/types.ts` — TypeScript interfaces for Task, TaskDetail, Counts, etc.
+- Build: `cd frontend && pnpm run build` → outputs to `frontend/dist/`
+- Dev: `cd frontend && pnpm dev` (Vite dev server proxies `/api` to FastAPI on port 8080)
+- **Node.js v22** required (installed via NodeSource); **pnpm** required (install: `curl -fsSL https://get.pnpm.io/install.sh | bash -`)
+
+### Backend (`src/web.py`)
+- `src/web.py` — FastAPI app, reuses the same `DynamoTaskStore` as the bot/runner
+- **SPA mode** — Serves the React SPA from `frontend/dist/`. Static assets at `/assets/`, catch-all serves `index.html`.
+- **JSON API** — All `/api/*` endpoints serve the React frontend: `GET /api/tasks`, `GET /api/tasks/{id}`, `POST /api/tasks`, `PATCH /api/tasks/{id}/status`, `POST /api/tasks/{id}/run`, `POST /api/tasks/{id}/comment`, `POST /api/tasks/{id}/reply`, `DELETE /api/tasks/{id}`, `GET /api/repos`, `GET /api/roles`, `GET /api/counts`, `GET /api/logs`, `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`
+- **Authentication** — Session-based auth via `AuthMiddleware` + Starlette `SessionMiddleware`. Enabled when `AUTH_EMAIL` and `AUTH_PASSWORD` are set. `AUTH_SECRET_KEY` must be set in `.env` for persistent sessions (otherwise a random key is generated per restart, invalidating sessions). Cookie: `max_age=30d`, `same_site=lax`, `https_only` controlled by `HTTPS_ONLY` env var. Exempt paths: `/api/auth/`, `/assets/`, `/webhook/`.
+- `run_web.py` — Entry point, runs uvicorn on `WEB_HOST:WEB_PORT`
+- In production, served behind nginx reverse proxy (HTTPS port 443 → uvicorn :8080); hostname is your own domain
+- SSL managed by certbot with auto-renewal
+
+### UI Design
+Linear-inspired dark theme (zinc-950 background). Flat sections, no heavy card borders. Status icons match Linear: circle (pending), spinner (in progress), check (completed), x (cancelled). Priority shown as colored bars. Sidebar uses indigo accent. Mobile-first responsive.
+
+## Projects & Daily Directives
+
+Projects are long-lived entities (`pk=PROJECT#<id>`, `sk=PROJECT`) with a title, spec, priority, target repo, status (`active`, `paused`, `completed`), and an optional `autopilot` flag. A human provides daily directives — short instructions that guide one day of agent work. Projects with `autopilot: true` also get daily autonomous plan proposals.
+
+### Flow
+1. Human creates a project with a spec (product/technical description)
+2. Human posts a directive (e.g. "Implement user registration")
+3. `POST /api/projects/:id/directive` stores a `DIR#<iso>` record, updates project flags, and triggers `run_task.py --directive` on EC2 via SSM
+4. `run_directive()` in `pipeline.py` decomposes directive + spec into independent tasks (plan-only style)
+5. Tasks carry `project_id`, `directive_sk`, `directive_date`; `build_prompt()` injects the spec as context
+6. When all tasks in a batch are terminal, `maybe_finalize_directive_batch()` flags the project `awaiting_next_directive`
+7. `pick_next_task()` skips tasks from finalized batches and paused projects
+8. Human reviews output, provides next directive
+
+### DynamoDB GSIs
+- `project-index` (`project_id`, `priority_sort_created`) — tasks linked to a project
+- `project-list-index` (`proj_status`, `project_updated`) — list projects by status
+
+### Hono project routes (`infra/packages/api/src/routes/projects.ts`)
+`GET /api/projects`, `GET /api/projects/:id`, `POST /api/projects`, `PATCH /api/projects/:id`, `DELETE /api/projects/:id`, `POST /api/projects/:id/directive`, `GET /api/projects/:id/snapshots`, `GET /api/projects/:id/proposals`, `PATCH /api/projects/:id/proposals/:propSk`, `GET /api/projects/:id/requests`, `PATCH /api/projects/:id/requests/:reqSk`, `GET /api/projects/:id/plans`, `GET /api/projects/:id/plans/:date`, `PATCH /api/projects/:id/plans/:date`, `POST /api/projects/:id/plans/:date/approve`, `POST /api/projects/:id/plans/:date/regenerate`
+
+### Digest Lambda
+`infra/packages/digest/` — scheduled Lambda (cron `0 14 * * ? *`) posts a daily summary of task activity and project progress to Discord via webhook. Includes KPI briefings, reflections, and pending proposals for projects with KPIs.
+
+### Metrics Lambda
+`infra/packages/metrics/` — scheduled Lambda (cron `0 6 * * ? *`) fetches metrics for active projects with KPIs. Adapters: PageSpeed Insights (free, no auth), GitHub (existing token). Writes `SNAPSHOT#<date>` records to DynamoDB, updates KPI current values, triggers `run_daily_cycle` on EC2 via SSM.
+
+### Autopilot Lambda
+`infra/packages/autopilot/` — scheduled Lambda (cron `0 7 * * ? *`, 7 AM UTC — after metrics/daily cycle) queries active projects with `autopilot: true` and triggers `run_task.py --propose-plan` for each on EC2 via SSM.
+
+### Autonomous Daily Cycle
+Projects can define KPIs (`kpis` array on the PROJECT record). When KPIs are present, the Metrics Lambda collects data daily and triggers `run_daily_cycle()` in `src/objectives.py` on EC2. The cycle: loads 14 days of snapshots + proposals + recent tasks + human tasks in review → calls the agent (opus) with a reflection prompt → parses structured JSON → creates PROP records (proposals) and `assignee: "human"` tasks. The agent also reviews human tasks marked `in_review`, either completing them or returning them to `pending` with a comment.
+
+Proposals go through a human approval queue in the web UI. Approved proposals create tasks that flow through the existing pipeline. Rejected proposals carry feedback the agent sees in the next cycle. Proposal outcomes are tracked — when a task completes, the PROP record is updated so the agent can learn what worked.
+
+DynamoDB record types under `PROJECT#<id>`: `PROJECT`, `DIR#<iso>`, `SNAPSHOT#<date>`, `PROP#<date>#<id>`, `PLAN#<YYYY-MM-DD>`. Task records use `TASK#<id>` as pk with sk prefixes `META`, `OUTPUT#`, `COMMENT#`, `PLAN#`, `LOG#`. See `docs/dynamo-schema.md` for the full single-table schema (all record types, GSIs, attributes, access patterns).
+
+See `docs/autonomous-objectives.md` for the full design vision and `docs/autonomous-objectives-setup.md` for human setup steps.
+
+### Project Autopilot
+Projects with `autopilot: true` get a daily plan proposal at 7 AM UTC (after metrics/daily cycle at 6 AM). The Autopilot Lambda (`infra/packages/autopilot/`) queries active autopilot projects and triggers `run_task.py --propose-plan <project_id>` on EC2 via SSM. `src/autopilot.py` loads project context (spec, recent tasks, approved proposals, prior plan outcomes) and calls the agent (opus) to propose 3–6 work items. Plans are stored as `PLAN#<YYYY-MM-DD>` records with `status=proposed`.
+
+**Plan lifecycle**: proposed → human reviews/edits in UI → approved (creates tasks with `directive_sk=PLAN#<date>`) → batch runs via poller → completed (outcome summary tracked). If a human sends a directive mid-day, pending plan tasks are auto-cancelled. Stale proposed plans from prior days block new proposals until approved or regenerated. The `--regenerate` flag allows re-proposing today's plan.
+
+Autopilot coexists with directives and the autonomous objectives (KPI) cycle. The daily cycle's proposals and human task outcomes feed into the autopilot's context. Directives take priority — issuing a directive cancels any pending plan tasks.
+
+## Adding Slash Commands
+Register new commands inside `TaskBot._register_commands()` using `@self.tree.command()`. Use `app_commands.describe()` and `app_commands.choices()` for parameters.
+
+## Auto-Deploy
+Merging to `main` triggers auto-deploy via GitHub webhook → `POST /webhook/github` → `scripts/deploy.sh` (git pull, pip install, restart bot + web UI via systemd, health check, rollback on failure). The webhook secret is in `.env` as `GITHUB_WEBHOOK_SECRET`.
+
+## Process Management
+The bot, web UI, and task poller run as **systemd services** (`taskbot-discord.service`, `taskbot-web.service`, `taskbot-poller.service`), managed by `scripts/install-systemd.sh`. All are set to `Restart=on-failure`. Use `sudo systemctl start/stop/restart taskbot-poller` etc. Logs: `journalctl -u taskbot-poller -f`.
+
+## Config
+All config via `.env` (loaded by python-dotenv). Never hardcode tokens or channel IDs.
+
+## Critical Implementation Rules
+
+### Task record writes — use `DynamoTaskStore` methods
+`store.create()` writes a new task record. `store.update_status()`, `store.append_section()`, and other methods perform atomic DynamoDB updates. Never bypass the store to write task data directly.
+
+### `target_repo` is a bare name, not a path
+Store and accept `target_repo` as a repo name only (e.g. `my-project`), never a full path. `_resolve_repo_dir` in `runner.py` resolves bare names to `WORKSPACE_DIR / name` (sibling of the bot repo). Legacy absolute paths are still handled for backwards compatibility. `get_repos()` normalises any legacy full paths to basenames. The UI shows a plain text input with datalist autocomplete — never a path input.
+
+### `in_review` status requires an actual PR
+Only set a task's status to `in_review` when a PR URL was actually returned by `commit_and_create_pr`. If `AUTO_PR` is disabled, no changes were committed, or PR creation failed, the task should end as `completed`. Plan-only tasks always end as `completed`.
+
+### CI workflow only runs on `pull_request`, not on branch pushes
+`.github/workflows/ci.yml` triggers on `push` to `main` and on `pull_request` — not on task branch pushes. Never gate PR creation on pre-push CI (`gh run list --branch <task-branch>` always returns `[]`). Correct order: push branch → create PR → poll `gh pr checks <pr_number>`. CI timeout on the PR is non-fatal.
+
+### Never split a rename/replacement across multiple commits
+When renaming or replacing a function, the removal of the old name and addition of the new name must be in the **same commit**. Splitting them creates a window where deployed code references a name that no longer exists, causing a `NameError` at runtime for any in-flight task.
+
+### Worktree isolation — no fallback to the main checkout
+The agent must always run inside an isolated git worktree. If `create_worktree()` returns `None`, **cancel the task** with an error message — never fall back to `WORK_DIR` or any path inside the main checkout. Reasoning-only agent calls (planning, comment replies) must run in a `tempfile.TemporaryDirectory` so any accidental file writes go nowhere.
+
+### `update_status` is atomic in DynamoDB
+`store.update_status()` performs a DynamoDB `UpdateItem`. There is no read-then-write race as with the old file-based approach. However, if you cache a task object locally and then call `update_status`, the cached object's `status` field will be stale — re-fetch via `store.get()` if you need the updated record.
+
+### `run_agent` cwd must always be explicit
+`run_agent(prompt)` with no `cwd` falls back to `WORK_DIR` (the user's home directory), which can be inside or adjacent to the main checkout. Always pass `cwd=wt_path` (the worktree), `cwd=plan_dir` (a tmpdir for planning), or `cwd=reply_dir` (a tmpdir for comment replies). Never rely on the default.
+
+### Concurrent runner safety — claim before doing work
+With `MAX_CONCURRENT_RUNNERS > 1`, two runners can pick the same task between `pick_next_task` returning and the status being written. The fix: call `store.update_status(task.id, IN_PROGRESS)` as the **first** action in `run_one`, then re-read and verify the status is still `IN_PROGRESS`. If another runner won the race, bail immediately. Never move slow setup (worktree creation, planning) before this claim.
+
+### Pre-commit hooks
+`.pre-commit-config.yaml` runs ruff (lint + `--fix`), ruff-format, trailing-whitespace, end-of-file-fixer, check-yaml, check-merge-conflict, and check-added-large-files on every commit; when `frontend/` changes it also runs `npm run typecheck` and `npm run lint` in `frontend/` (same as CI’s `frontend-check` job). To install after a fresh clone: `.venv/bin/pip install pre-commit && .venv/bin/pre-commit install`. Run `cd frontend && npm ci` (or `pnpm install`) so `node_modules` exists before committing frontend changes. Ruff config lives in `ruff.toml` (target py39, line-length 100).
+
+### Cancelling a running agent
+When `PATCH /api/tasks/{id}/status` sets `cancelled`, the endpoint calls `cancel_runner(task_id)` (in `web.py`), which calls `kill_runner_for_task()` in `runner.py`. That function reads `/tmp/task-runner-<id>.pid`, validates the PID is still alive, and sends `SIGTERM` to the entire process group — killing both `run_task.py` and the `agent` child together.
+
+The SIGTERM handler raises `_TaskCancelledError` (a `BaseException` subclass, not `Exception`) so it propagates through `run_one` without being swallowed by broad `except Exception` clauses, triggering the `finally: cleanup_worktree` block correctly. **The handler itself does no file I/O** — it only raises the exception. The cancellation note and `plog` entry are written in the `except _TaskCancelledError` block in `main()` after the stack has unwound. This avoids deadlocking if the signal fires while the main thread is mid-write to the same file.
+
+Pidfiles are written in two places:
+- `main()` — immediately after slot lock is acquired, for direct invocations (`run_task.py <task_id>`)
+- `run_one()` — after the task is claimed, for cron invocations (no task_id arg)
+
+Both are wrapped in try/finally so the pidfile is always removed. `remove_pidfile` is idempotent — double-remove is safe. Stale pidfiles (PID no longer alive) are detected and cleaned up automatically by `kill_runner_for_task`.
+
+### Healer must not re-queue user-cancelled tasks
+`heal_cancelled_with_work` diagnoses cancelled and failed tasks with agent output and may reset them to `pending`. This must never apply to tasks the user deliberately cancelled. Fix: `PATCH /api/tasks/{id}/status cancelled` stamps `cancelled_by: user` via `store.set_cancelled_by()`; the healer skips any task with `cancelled_by: user`.
+
+### `failed` vs `cancelled` — two distinct terminal statuses
+`failed` means the pipeline/agent encountered an error (non-zero exit, timeout, wrong-directory write, plan parse failure). `cancelled` means a human deliberately stopped the task. The pipeline sets `failed`; only user actions set `cancelled`. Both are terminal for dependency resolution and directive batch finalization. The healer operates on both but skips `cancelled_by: user`. The UI shows amber/warning styling for `failed` and red for `cancelled`.
+
+### Frontmatter insert regex — match the actual serialised format
+The closing YAML frontmatter delimiter is serialised as `---\n\n# Title` (blank line between `---` and the heading). Patterns like `^---\n# ` will **never match** and silently leave the field unwritten. Always use `^---(\n\n# )` and capture the suffix to insert before it:
+```python
+re.sub(r"(?m)^---(\n\n# )", r"new_field: value\n---\1", content, count=1)
+```
+This applies to `set_reply_pending`, `set_cancelled_by`, and any future frontmatter insert helpers.
+
+### API endpoints must validate enum inputs
+`TaskStatus(body.status)` raises `ValueError` for unknown strings, producing an unhandled 500. Always wrap enum construction in `try/except ValueError` and return HTTP 400. Same applies to `TaskPriority`, `ModelTier`, and any other enum field accepted from request bodies.
+
+### PR diff verification runs before `in_review` is set
+After creating a PR, `_verify_pr_diff()` in `src/pr.py` runs a fast agent to check the diff matches the task. If a concern is flagged, a `## PR Verification` section is appended to the task record. The PR is still created and the task still moves to `in_review` either way — the verification is advisory, not a blocker, since a concern could be a false positive. The note surfaces in the task detail view.
+
+### Rerun button resets task to pending
+`POST /api/tasks/{id}/rerun` (in `src/routers/tasks.py`) resets `completed`, `in_review`, or `cancelled` tasks to `pending` and fires `trigger_runner`. The frontend shows a **Rerun** button (with `RotateCcw` icon) for any of those three statuses in `TaskDetail`. It is intentionally separate from the existing **Run** button (which only fires for already-pending tasks) and the **Break into Subtasks** button (for cancelled tasks).
+
+### Task delete cleans up all artifacts
+`DELETE /api/tasks/{id}` deletes all subtask records and the parent record from DynamoDB, then fires a background thread to `git push origin --delete` the remote branch, remove the local branch, remove any leftover worktree, and delete the pidfile. The HTTP response returns immediately without waiting for git. Keeping remote branches clean reduces the set of refs agents see when they enumerate `git branch -r`.
+
+### DynamoDB is the sole task store
+All task data lives in DynamoDB (`DynamoTaskStore`). There is no file-based fallback. Every `run_*.py` entry point creates the store as `DynamoTaskStore()` directly. `python-frontmatter` is no longer used for task storage.
+
+### FastAPI TestClient for API-level tests
+Use `from fastapi.testclient import TestClient` (ships with Starlette, already installed) to test HTTP endpoints at the router level. Wire it with `monkeypatch.setattr(tasks_router, "_get_store", lambda: tmp_tasks)` and stub `web_mod.trigger_runner`. See `tests/test_api.py` for the pattern. This is the right level for testing auth middleware, status codes, and request validation — not just the underlying functions.
+
+### `POST /api/tasks` validates priority enum
+`create_task` in `src/routers/tasks.py` validates `body.priority` against `TaskPriority` before calling `store.create()`, returning HTTP 400 for invalid values. Same pattern as `update_status`.
+`run_comment_reply` in `src/pipeline.py` sends only the most recent non-agent comment to the agent. Do **not** include the full comment history or previous agent output in the prompt — the agent gets confused and responds to old comments instead of the new one. Filter with `[c for c in comments if c.author != "agent"]` and take `[-1]`.
+
+### Monkeypatching `run_agent` in pipeline tests
+`run_agent` is imported into `src/pipeline.py` at module load time. Always patch `src.pipeline.run_agent` (not `src.runner.run_agent`) when testing pipeline functions like `plan_task`, `run_comment_reply`, etc.
+
+### `/api/repos` lives in the tasks router, not web.py
+`GET /api/repos` is defined in `src/routers/tasks.py` alongside `/api/roles`, `/api/counts`, and `/api/logs`. It calls `_get_store().get_repos()` — not `store.get_repos()` directly (bare `store` is not in scope in the router module; use `_get_store()` which does `from ..web import store`).
+
+### Frontend is deployed to S3/CloudFront, not served by FastAPI
+The React SPA is hosted on S3 + CloudFront (not by FastAPI). GitHub Actions deploys on push to `main` via `.github/workflows/deploy-ui.yml` using repository secrets (`docs/infra-deploy.md`). `scripts/deploy.sh` (GitHub webhook on the server) only restarts the backend. Manual deploy: `scripts/deploy-frontend.sh` with `DEPLOY_UI_S3_BUCKET` and `DEPLOY_UI_CLOUDFRONT_ID` set. Backend-only fixes do not require a frontend redeploy unless the SPA changed.
+
+### Restarting the web UI — use systemctl
+Restart via `sudo systemctl restart taskbot-web`. If it fails to bind port 8080 (`[Errno 98] address already in use`), a previous process is still holding the socket. Use `lsof -ti:8080 | xargs -r kill -9` or `fuser -k 8080/tcp` before restarting.
+
+### Host firewall is firewalld, not raw nftables
+Amazon Linux 2023 uses `firewalld` (installed as a Fail2Ban dependency) to manage nftables rules. The default policy only allows SSH. Ports 80 and 443 must be opened explicitly with `sudo firewall-cmd --permanent --add-service=http && sudo firewall-cmd --permanent --add-service=https && sudo firewall-cmd --reload`. Do not write raw nftables rules — firewalld overrides them on reload.
+
+### Entry-point scripts always use DynamoTaskStore
+Every `run_*.py` entry point creates the store as `DynamoTaskStore()` directly — there is no file-based fallback. If you add a new entry point, import and instantiate `DynamoTaskStore`:
+```python
+from src.dynamo_store import DynamoTaskStore
+store = DynamoTaskStore()
+```
+
+### Cursor CLI model names change — use `auto` as the code default
+Cursor periodically retires model aliases (e.g. `sonnet-4.6` was removed). Code defaults (`os.getenv("MODEL_FAST", "...")`) must use `auto` so the system keeps working even if `.env` contains a stale name. The concrete model name belongs in `.env`. When a model error surfaces (`Cannot use this model: ...`), `run_agent` automatically retries without `--model` so the CLI picks its default — the pipeline won't break. Update `.env` when convenient but it's no longer an emergency.
+
+### Model tiering — expensive plans, cheap execution
+Three model tiers control which LLM runs each pipeline stage:
+- `MODEL_FULL` (opus-thinking) — planning, plan-only decomposition, directive decomposition, PR final review, daily cycle. High reasoning needed.
+- `MODEL_DEFAULT` (sonnet) — middle tier, available for tasks that need more reasoning than composer but less than opus.
+- `MODEL_FAST` (composer-2) — execution, doc update, PR body generation, PR diff self-review, comment replies. Code-focused, cheap.
+
+Planning uses `MODEL_PLAN` (resolves to `MODEL_FULL`, falls back to `MODEL_FAST` if `MODEL_FULL` is unset). To change models, update `.env` — never hardcode model names in Python source.
+
+### Never run SST on the EC2 instance
+The EC2 instance is a resource-constrained spot instance with limited disk. SST plugin downloads (Pulumi providers for AWS, Cloudflare, etc.) consume 2+ GB and previously filled the disk. All `sst` commands (`sst deploy`, `sst dev`, `npx sst …`) must run from a local machine or CI — never from the EC2 instance. If a task involves `infra/` changes, the agent should only modify source files; deployment is handled by CI or a local `sst deploy`.
+
+### Poller readiness filter must match `pick_next_task`
+`run_poller.py` decides whether to spawn runners; `pick_next_task()` in `pipeline.py` decides which task to claim. If the poller's filter is looser, it spawns runners that immediately exit with "No pending tasks," wasting cycles. Both must apply the same project-level checks: skip tasks from paused projects and tasks belonging to directive batches flagged `awaiting_next_directive`. When adding a new filter to `pick_next_task`, also add it to the poller.

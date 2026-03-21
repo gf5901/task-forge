@@ -1,0 +1,44 @@
+---
+description: Runner pipeline conventions, subprocess safety, and worktree patterns for src/runner.py
+globs: "src/runner.py"
+alwaysApply: false
+---
+
+# Runner Pipeline Conventions
+
+## Subprocess safety
+
+### Close log file handles after `Popen`
+`open()` passed to `Popen(stdout=...)` is not closed by the child process. Always use `try/finally` to close the fd in the parent after `Popen` returns. Also pass `close_fds=True`.
+
+### Path constants must be anchored to `__file__`
+Never resolve paths relative to `cwd` at module import time — the working directory may differ when the module is imported from a worktree or test. Use `Path(__file__).resolve().parent...` instead. This applies to `LOG_PATH`, `PROJECT_ROOT`, `WORKTREE_BASE`, and any other module-level path constant.
+
+## Task status rules
+
+### Failed/timed-out tasks → `cancelled`, never `pending`
+Resetting a failed task to `pending` causes cron to retry it forever. On agent failure, timeout, or unexpected exception (including the catch-all `except Exception` in `run_one`), always set status to `cancelled`. The only code path that sets `pending` is task *creation*.
+
+## PR / commit step
+
+### `commit_and_create_pr` returns a sentinel, not None, for "no changes"
+The function returns `NO_CHANGES_SENTINEL` (`"NO_CHANGES"`) when the worktree is clean, and `None` when CI failed or push/PR creation failed. Callers must distinguish these — "no changes" is a normal outcome (task completes cleanly), `None` means something went wrong. Never collapse both to the same log message.
+
+### Worktree-clean but main-checkout-dirty = wrong directory
+When the worktree has no changes after agent execution, check `git status --porcelain` on the main checkout (`PROJECT_ROOT`) too. If it's dirty, the agent wrote files outside the worktree — log a warning and append a `Warning` section to the task record listing the affected paths.
+
+## Timeouts
+
+### Keep `PLAN_TIMEOUT` well below `TASK_TIMEOUT`
+Planning is a single fast-model call that should complete in under 60s. Default `PLAN_TIMEOUT=120`, `TASK_TIMEOUT=900`. Do not raise them together as a pair — a stuck planner should not consume the full task budget. `PLAN_TIMEOUT` also governs `run_plan_only()`; `TASK_TIMEOUT` governs execution, doc update, and comment reply.
+
+## External repo tasks
+
+### `build_prompt` must not include a `Working directory` hint
+The agent is already spawned with `cwd=wt_path` (the worktree). Adding a `Working directory: /path/to/repo` line in the prompt causes the agent to `cd` to that path, escaping the worktree and writing directly to the main checkout. The worktree's `cwd` is the only correct working directory signal — do not duplicate it in the prompt text.
+
+### Wrong-directory check must use the target repo, not `PROJECT_ROOT`
+When checking whether the agent accidentally modified the main checkout (worktree-clean but dirty main checkout), always run `git status` against `_resolve_repo_dir(task)`. For tasks targeting `task-forge` itself that is `PROJECT_ROOT`, but for external repos it is the sibling directory. Hardcoding `PROJECT_ROOT` here will silently miss contamination of any other repo.
+
+## `run_agent` return signature
+`run_agent()` returns a 3-tuple: `(result, elapsed, session_id)`. Test mocks must also return 3 values — `(fake_result, 1.0, "")`. Returning a 2-tuple causes silent unpack errors at runtime.

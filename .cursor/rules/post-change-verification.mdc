@@ -1,0 +1,62 @@
+---
+description: After modifying Python source, frontend code, or dependencies — verify deps are installed, builds succeed, and running services are restarted
+globs: "**/*.py,**/requirements*.txt,frontend/src/**,frontend/package.json"
+alwaysApply: false
+---
+
+# Post-Change Verification
+
+After modifying source files, **always** run these checks before marking work complete.
+
+## 1. Python dependencies
+
+If you added an `import` for a package not in the standard library:
+
+- Verify it's listed in `requirements.txt` (add it if missing — use `pip index versions <pkg>` to get the latest)
+- Run `pip install -r requirements.txt` in the project venv to ensure it's actually installed
+- Verify with: `.venv/bin/python3 -c "from src.web import app"` or `.venv/bin/python3 -c "from src.runner import main"`
+
+## 2. Frontend dependencies and build
+
+If you modified files under `frontend/`:
+
+- If you added a new package, run `cd frontend && pnpm install`
+- Rebuild: `cd frontend && pnpm run build` — check for TypeScript or build errors
+- The build outputs to `frontend/dist/` which FastAPI serves in SPA mode
+
+## 3. Verify committed changes actually contain what you expect
+
+After committing, **always** verify the committed file matches what was intended:
+
+```bash
+git show HEAD:src/runner.py | grep -c "expected_function_name"
+```
+
+This catches the failure mode where a `git checkout <branch> -- <file>` silently restores an old version of the file instead of the edited version. Always confirm with `git diff HEAD~1 -- <file>` that the diff contains your actual changes, not a revert or wrong version.
+
+## 4. Restart affected services
+
+Changes are not live until the service is restarted:
+
+| Changed files | Action |
+|---|---|
+| `src/web.py` | `sudo systemctl restart taskbot-web` |
+| `frontend/src/**` | `cd frontend && pnpm run build`, then `sudo systemctl restart taskbot-web` |
+| `src/bot.py` | `sudo systemctl restart taskbot-discord` |
+| `src/runner.py` | No restart needed (runner is spawned per-task by the poller) |
+
+Always verify the service started: `journalctl -u taskbot-web -n5` should show "Uvicorn running", not an error.
+
+## 5. Smoke test
+
+After restarting, confirm the service responds:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/
+```
+
+A `200` means success. A connection error means the service crashed — check logs.
+
+## 6. Deploy gap — auto-deploy only fires on merged PRs
+
+The GitHub webhook fires once per push to `main`. If you push two commits in quick succession (or push directly), the webhook fires on the first push and the second commit is never deployed automatically. After pushing any fix, always run `bash scripts/deploy.sh` manually to ensure the running services reflect the latest `main`.

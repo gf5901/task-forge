@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ current_status | capitalize }} Tasks{% endblock %}
+{% block content %}
+<div class="main-header">
+  <h1>{% if current_status == 'all' %}All Tasks{% elif current_status == 'in_progress' %}In Progress{% else %}{{ current_status | capitalize }}{% endif %}</h1>
+  <span class="count">{{ tasks | length }}</span>
+</div>
+<div class="task-list">
+{% for task in tasks %}
+  <a class="task-row" href="/tasks/{{ task.id }}">
+    <span class="st st-{{ task.status.value }}">{% if task.status.value == 'completed' %}✓{% elif task.status.value == 'cancelled' %}–{% endif %}</span>
+    <span class="task-id">{{ task.id }}</span>
+    <span class="task-title">{{ task.title }}</span>
+    {% if task.target_repo %}<span class="task-repo">{{ task.target_repo }}</span>{% endif %}
+    {% for tag in task.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+    <span class="pr pr-{{ task.priority.value }}"><span></span><span></span><span></span><span></span></span>
+    <span class="task-time">{{ task.created_at | timeago }}</span>
+  </a>
+{% else %}
+  <div class="empty">
+    <div class="empty-icon">○</div>
+    <div>No tasks yet</div>
+  </div>
+{% endfor %}
+</div>
+{% endblock %}

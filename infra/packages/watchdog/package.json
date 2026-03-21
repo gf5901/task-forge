@@ -1,0 +1,6 @@
+{
+  "name": "watchdog",
+  "private": true,
+  "type": "module",
+  "dependencies": {}
+}

@@ -1,0 +1,43 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.2
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^(src|tests)/.*\.py$
+      - id: ruff-format
+        files: ^(src|tests)/.*\.py$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^frontend/
+      - id: end-of-file-fixer
+        exclude: ^frontend/
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+
+  # Frontend — mirrors .github/workflows/ci.yml (frontend-check job)
+  - repo: local
+    hooks:
+      - id: frontend-typecheck
+        name: frontend TypeScript (tsc -b)
+        language: system
+        entry: bash
+        args:
+          - -c
+          - cd frontend && npm run typecheck
+        pass_filenames: false
+        files: ^frontend/
+      - id: frontend-eslint
+        name: frontend ESLint
+        language: system
+        entry: bash
+        args:
+          - -c
+          - cd frontend && npm run lint
+        pass_filenames: false
+        files: ^frontend/
