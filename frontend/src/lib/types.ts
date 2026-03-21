@@ -29,6 +29,10 @@ export interface Task {
 
 export type ProjectStatus = "active" | "paused" | "completed"
 
+export type AutopilotMode = "daily" | "continuous"
+
+export type CyclePauseReason = "time_expired" | "blocked" | "failures" | "manual" | ""
+
 export type KPIDirection = "up" | "down" | "maintain"
 
 export interface KPI {
@@ -76,8 +80,15 @@ export interface Project {
   awaiting_next_directive: boolean
   active_directive_sk: string
   kpis: KPI[]
-  /** Daily autopilot plan (Lambda 7 AM UTC); omitted on older API responses */
+  /** Autopilot enabled; omitted on older API responses */
   autopilot?: boolean
+  autopilot_mode?: AutopilotMode
+  cycle_started_at?: string
+  cycle_max_hours?: number
+  cycle_paused?: boolean
+  cycle_pause_reason?: CyclePauseReason
+  cycle_feedback?: string
+  next_check_at?: string
 }
 
 export interface ProjectListItem extends Project {

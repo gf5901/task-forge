@@ -663,6 +663,9 @@ function projectPk(id: string): string {
 function itemToProject(item: Record<string, unknown>): Project {
   let kpis = item.kpis as KPI[] | undefined;
   if (!Array.isArray(kpis)) kpis = [];
+  const modeRaw = (item.autopilot_mode as string) ?? "daily";
+  const autopilotMode =
+    modeRaw === "continuous" ? "continuous" : "daily";
   return {
     id: (item.project_id as string) ?? "",
     title: (item.title as string) ?? "",
@@ -676,6 +679,16 @@ function itemToProject(item: Record<string, unknown>): Project {
     active_directive_sk: (item.active_directive_sk as string) ?? "",
     kpis,
     autopilot: Boolean(item.autopilot),
+    autopilot_mode: autopilotMode,
+    cycle_started_at: (item.cycle_started_at as string) ?? "",
+    cycle_max_hours:
+      typeof item.cycle_max_hours === "number"
+        ? item.cycle_max_hours
+        : Number(item.cycle_max_hours) || 24,
+    cycle_paused: Boolean(item.cycle_paused),
+    cycle_pause_reason: (item.cycle_pause_reason as Project["cycle_pause_reason"]) ?? "",
+    cycle_feedback: (item.cycle_feedback as string) ?? "",
+    next_check_at: (item.next_check_at as string) ?? "",
   };
 }
 
@@ -700,10 +713,14 @@ export async function createProject(params: {
   status?: ProjectStatus;
   kpis?: KPI[];
   autopilot?: boolean;
+  autopilot_mode?: Project["autopilot_mode"];
 }): Promise<Project> {
   const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00");
   const status = params.status ?? "active";
+  const autopilot = params.autopilot ?? false;
+  const autopilotMode =
+    params.autopilot_mode === "continuous" ? "continuous" : "daily";
   const item: Record<string, unknown> = {
     pk: projectPk(id),
     sk: "PROJECT",
@@ -718,7 +735,14 @@ export async function createProject(params: {
     awaiting_next_directive: false,
     active_directive_sk: "",
     kpis: params.kpis ?? [],
-    autopilot: params.autopilot ?? false,
+    autopilot,
+    autopilot_mode: autopilotMode,
+    cycle_started_at: "",
+    cycle_max_hours: 24,
+    cycle_paused: false,
+    cycle_pause_reason: "",
+    cycle_feedback: "",
+    next_check_at: "",
   };
   if (params.target_repo?.trim()) item.target_repo = params.target_repo.trim();
   await ddb.send(new PutCommand({ TableName: TABLE_NAME, Item: item }));
@@ -778,6 +802,13 @@ export async function updateProject(
     active_directive_sk: string;
     kpis: KPI[];
     autopilot: boolean;
+    autopilot_mode: Project["autopilot_mode"];
+    cycle_started_at: string;
+    cycle_max_hours: number;
+    cycle_paused: boolean;
+    cycle_pause_reason: Project["cycle_pause_reason"];
+    cycle_feedback: string;
+    next_check_at: string;
   }>
 ): Promise<Project | null> {
   const p = await getProject(projectId);
@@ -842,6 +873,42 @@ export async function updateProject(
     names["#ap"] = "autopilot";
     vals[":ap"] = updates.autopilot;
     sets.push("#ap = :ap");
+  }
+  if (updates.autopilot_mode !== undefined) {
+    names["#am"] = "autopilot_mode";
+    vals[":am"] =
+      updates.autopilot_mode === "continuous" ? "continuous" : "daily";
+    sets.push("#am = :am");
+  }
+  if (updates.cycle_started_at !== undefined) {
+    names["#cs"] = "cycle_started_at";
+    vals[":cs"] = updates.cycle_started_at;
+    sets.push("#cs = :cs");
+  }
+  if (updates.cycle_max_hours !== undefined) {
+    names["#cmh"] = "cycle_max_hours";
+    vals[":cmh"] = updates.cycle_max_hours;
+    sets.push("#cmh = :cmh");
+  }
+  if (updates.cycle_paused !== undefined) {
+    names["#cp"] = "cycle_paused";
+    vals[":cp"] = updates.cycle_paused;
+    sets.push("#cp = :cp");
+  }
+  if (updates.cycle_pause_reason !== undefined) {
+    names["#cpr"] = "cycle_pause_reason";
+    vals[":cpr"] = updates.cycle_pause_reason;
+    sets.push("#cpr = :cpr");
+  }
+  if (updates.cycle_feedback !== undefined) {
+    names["#cf"] = "cycle_feedback";
+    vals[":cf"] = updates.cycle_feedback;
+    sets.push("#cf = :cf");
+  }
+  if (updates.next_check_at !== undefined) {
+    names["#nc"] = "next_check_at";
+    vals[":nc"] = updates.next_check_at;
+    sets.push("#nc = :nc");
   }
   let updateExpr = `SET ${sets.join(", ")}`;
   if (removes.length) updateExpr += ` REMOVE ${removes.join(", ")}`;
@@ -981,8 +1048,16 @@ export async function maybeFinalizeDirectiveBatch(taskId: string): Promise<void>
   }
 }
 
-function planRecordSk(dateStr: string): string {
-  return `PLAN#${dateStr}`;
+function planRecordSk(planIdSuffix: string): string {
+  return `PLAN#${planIdSuffix}`;
+}
+
+/** Legacy daily id (YYYY-MM-DD) or continuous id (YYYY-MM-DDTHH:MM:SS UTC). */
+export function isValidPlanId(s: string): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(s) ||
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(s)
+  );
 }
 
 function itemToPlan(item: Record<string, unknown>): DailyPlan {
@@ -1057,12 +1132,12 @@ async function finalizePlanBatchRecord(
 
 export async function getPlan(
   projectId: string,
-  dateStr: string,
+  planIdSuffix: string,
 ): Promise<DailyPlan | null> {
   const resp = await ddb.send(
     new GetCommand({
       TableName: TABLE_NAME,
-      Key: { pk: projectPk(projectId), sk: planRecordSk(dateStr) },
+      Key: { pk: projectPk(projectId), sk: planRecordSk(planIdSuffix) },
       ConsistentRead: true,
     }),
   );
@@ -1087,13 +1162,14 @@ export async function listPlans(
 
 export async function approvePlanAndCreateTasks(
   projectId: string,
-  dateStr: string,
+  planIdSuffix: string,
   humanNotes: string,
   project: Project,
 ): Promise<{ plan: DailyPlan; tasks: Task[] } | null> {
-  const plan = await getPlan(projectId, dateStr);
+  const plan = await getPlan(projectId, planIdSuffix);
   if (!plan || plan.status !== "proposed" || plan.items.length === 0) return null;
-  const planSk = planRecordSk(dateStr);
+  const planSk = planRecordSk(planIdSuffix);
+  const directiveDate = plan.plan_date || planIdSuffix.slice(0, 10);
   const taskIds: string[] = [];
   const created: Task[] = [];
   for (const item of plan.items) {
@@ -1104,7 +1180,7 @@ export async function approvePlanAndCreateTasks(
       target_repo: project.target_repo,
       project_id: projectId,
       directive_sk: planSk,
-      directive_date: dateStr,
+      directive_date: directiveDate,
       role: item.role?.trim() || undefined,
       created_by: "autopilot-plan",
     });
@@ -1132,17 +1208,17 @@ export async function approvePlanAndCreateTasks(
     active_directive_sk: planSk,
     awaiting_next_directive: false,
   });
-  const updated = await getPlan(projectId, dateStr);
+  const updated = await getPlan(projectId, planIdSuffix);
   return updated ? { plan: updated, tasks: created } : null;
 }
 
 export async function updatePlanItems(
   projectId: string,
-  dateStr: string,
+  planIdSuffix: string,
   items: PlanItem[],
   reflection?: string,
 ): Promise<DailyPlan | null> {
-  const existing = await getPlan(projectId, dateStr);
+  const existing = await getPlan(projectId, planIdSuffix);
   if (!existing || existing.status !== "proposed") return null;
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00");
   const names: Record<string, string> = { "#u": "updated_at", "#it": "items" };
@@ -1156,13 +1232,13 @@ export async function updatePlanItems(
   await ddb.send(
     new UpdateCommand({
       TableName: TABLE_NAME,
-      Key: { pk: projectPk(projectId), sk: planRecordSk(dateStr) },
+      Key: { pk: projectPk(projectId), sk: planRecordSk(planIdSuffix) },
       UpdateExpression: expr,
       ExpressionAttributeNames: names,
       ExpressionAttributeValues: vals,
     }),
   );
-  return getPlan(projectId, dateStr);
+  return getPlan(projectId, planIdSuffix);
 }
 
 /** Cancel pending tasks tied to any PLAN# batch (superseded by a new directive). */

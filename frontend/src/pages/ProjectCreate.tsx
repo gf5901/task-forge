@@ -21,7 +21,9 @@ export default function ProjectCreate() {
   const [genOpen, setGenOpen] = useState(false)
   const [genPrompt, setGenPrompt] = useState("")
   const [generating, setGenerating] = useState(false)
-  const [autopilot, setAutopilot] = useState(false)
+  const [autopilotModeCreate, setAutopilotModeCreate] = useState<"off" | "daily" | "continuous">(
+    "off",
+  )
 
   useEffect(() => {
     fetchRepos()
@@ -42,7 +44,8 @@ export default function ProjectCreate() {
         spec: spec.trim(),
         priority,
         target_repo: targetRepo.trim(),
-        autopilot,
+        autopilot: autopilotModeCreate !== "off",
+        autopilot_mode: autopilotModeCreate === "continuous" ? "continuous" : "daily",
       })
       toast.success("Project created")
       navigate(`/projects/${p.id}`)
@@ -163,15 +166,18 @@ export default function ProjectCreate() {
         </div>
 
         <div>
-          <label className="flex cursor-pointer items-center gap-2 text-[13px] text-zinc-400">
-            <input
-              type="checkbox"
-              checked={autopilot}
-              onChange={(e) => setAutopilot(e.target.checked)}
-              className="rounded border-zinc-600 bg-zinc-900"
-            />
-            Autopilot — daily proposed plan (7 AM UTC), you approve once, then tasks run via poller
-          </label>
+          <label className="mb-1.5 block text-[13px] text-zinc-400">Autopilot</label>
+          <select
+            value={autopilotModeCreate}
+            onChange={(e) =>
+              setAutopilotModeCreate(e.target.value as "off" | "daily" | "continuous")
+            }
+            className="w-full rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-[13px] text-zinc-100"
+          >
+            <option value="off">Off</option>
+            <option value="daily">Daily — plan at 07:00 UTC, you approve</option>
+            <option value="continuous">Continuous — timed cycles, auto-approve (hourly tick)</option>
+          </select>
         </div>
 
         <div>

@@ -40,6 +40,16 @@ export interface Task {
 
 export type ProjectStatus = "active" | "paused" | "completed";
 
+/** Autopilot cadence: daily (human approves, 7 UTC tick) or continuous (auto-approve, hourly tick). */
+export type AutopilotMode = "daily" | "continuous";
+
+export type CyclePauseReason =
+  | "time_expired"
+  | "blocked"
+  | "failures"
+  | "manual"
+  | "";
+
 export type KPIDirection = "up" | "down" | "maintain";
 
 export interface KPI {
@@ -64,8 +74,19 @@ export interface Project {
   awaiting_next_directive: boolean;
   active_directive_sk: string;
   kpis: KPI[];
-  /** When true, daily PLAN# proposal runs (7 AM UTC cron) for approve-then-execute workflow */
+  /** When true, autopilot Lambda may trigger plan proposals on EC2 */
   autopilot: boolean;
+  autopilot_mode: AutopilotMode;
+  /** ISO datetime when the current continuous cycle started; empty if none */
+  cycle_started_at: string;
+  /** Max wall-clock hours per continuous cycle (e.g. 168 for one week) */
+  cycle_max_hours: number;
+  cycle_paused: boolean;
+  cycle_pause_reason: CyclePauseReason;
+  /** Human notes from last review; injected into next planner prompt */
+  cycle_feedback: string;
+  /** Agent-requested “check back after” time (ISO); empty if none */
+  next_check_at: string;
 }
 
 export type PlanStatus = "proposed" | "approved" | "executing" | "completed";

@@ -7,7 +7,7 @@ Usage:
     python run_task.py --reply <task_id>  # reply to comments on a task
     python run_task.py --directive <project_id> <directive_sk>  # decompose directive into tasks
     python run_task.py --daily-cycle <project_id>  # run daily observe/reflect/propose cycle
-    python run_task.py --propose-plan <project_id>  # autopilot daily plan (optional: --regenerate)
+    python run_task.py --propose-plan <project_id>  # autopilot plan [--regenerate] [--plan-suffix ID]
 """
 
 import os
@@ -80,14 +80,30 @@ if __name__ == "__main__":
         ok = run_daily_cycle(store, sys.argv[2])
         raise SystemExit(0 if ok else 1)
     if len(sys.argv) >= 3 and sys.argv[1] == "--propose-plan":
-        from src.logging_config import configure as _configure_logging
         from src.autopilot import propose_daily_plan
+        from src.logging_config import configure as _configure_logging
 
         _configure_logging()
         store = _make_store()
         project_id = sys.argv[2]
-        regenerate = "--regenerate" in sys.argv
-        ok = propose_daily_plan(store, project_id, regenerate=regenerate)
+        regenerate = False
+        plan_suffix = None
+        i = 3
+        while i < len(sys.argv):
+            if sys.argv[i] == "--regenerate":
+                regenerate = True
+                i += 1
+            elif sys.argv[i] == "--plan-suffix" and i + 1 < len(sys.argv):
+                plan_suffix = sys.argv[i + 1]
+                i += 2
+            else:
+                i += 1
+        ok = propose_daily_plan(
+            store,
+            project_id,
+            regenerate=regenerate,
+            plan_suffix=plan_suffix,
+        )
         raise SystemExit(0 if ok else 1)
     if len(sys.argv) >= 3 and sys.argv[1] == "--reply":
         from src.logging_config import configure as _configure_logging

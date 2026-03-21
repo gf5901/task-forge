@@ -53,17 +53,22 @@ export async function triggerDirectiveDecomposition(
   );
 }
 
-/** Run autopilot daily plan proposal on EC2 (Cursor agent). */
+/** Run autopilot plan proposal on EC2 (Cursor agent). */
 export async function triggerProposePlan(
   projectId: string,
-  regenerate = false
+  regenerate = false,
+  planSuffix?: string
 ): Promise<void> {
   const esc = (s: string) => s.replace(/'/g, "'\\''");
   const extra = regenerate ? " --regenerate" : "";
+  const suffixArg =
+    planSuffix !== undefined && planSuffix !== ""
+      ? ` --plan-suffix '${esc(planSuffix)}'`
+      : "";
   await sendCommand(
     `sudo -u ec2-user setsid ${VENV_PYTHON} ${RUN_TASK_SCRIPT} --propose-plan '${esc(
       projectId
-    )}'${extra} >/dev/null 2>&1 &`
+    )}'${extra}${suffixArg} >/dev/null 2>&1 &`
   );
 }
 

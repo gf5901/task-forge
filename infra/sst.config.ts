@@ -150,9 +150,9 @@ export default $config({
       },
     });
 
-    /** Daily autopilot plan proposal (after metrics/daily cycle); 7 AM UTC */
+    /** Autopilot: hourly tick (continuous); daily-mode projects run only at 07 UTC in Lambda filter */
     new sst.aws.Cron("AutopilotPlan", {
-      schedule: "cron(0 7 * * ? *)",
+      schedule: "cron(0 * * * ? *)",
       job: {
         handler: "packages/autopilot/src/index.handler",
         runtime: "nodejs22.x",

@@ -158,7 +158,14 @@ Project metadata. `id` is 8-char hex.
 | awaiting_next_directive | bool? | All tasks in current batch are terminal |
 | active_directive_sk | string? | Currently executing `DIR#` or `PLAN#` sk |
 | kpis | list\<KPI\>? | KPI definitions (id, name, source, metric, target, direction, current) |
-| autopilot | bool? | Enable daily plan proposals |
+| autopilot | bool? | Enable autopilot plan proposals |
+| autopilot_mode | string? | `daily` (human approve, 07 UTC) or `continuous` (auto-approve, hourly tick while cycle active) |
+| cycle_started_at | string? | ISO start of current continuous cycle |
+| cycle_max_hours | number? | Wall-clock hours per cycle (default 24) |
+| cycle_paused | bool? | Waiting for human review / manual stop |
+| cycle_pause_reason | string? | `time_expired` · `blocked` · `failures` · `manual` |
+| cycle_feedback | string? | Human notes for next planner pass |
+| next_check_at | string? | Agent-requested deferral (ISO); empty if none |
 
 **GSI:** project-list-index (`proj_status`, `project_updated`).
 
@@ -233,13 +240,13 @@ Durable notes written by the daily-cycle agent via `./ctx memory save` (max 50 p
 
 ---
 
-### PLAN (Daily Plan) — `pk=PROJECT#{id}  sk=PLAN#{YYYY-MM-DD}`
+### PLAN (Autopilot Plan) — `pk=PROJECT#{id}  sk=PLAN#…`
 
-Autopilot daily plans. One per project per day.
+Autopilot plans. Sort key is either legacy `PLAN#YYYY-MM-DD` (one per calendar day) or `PLAN#YYYY-MM-DDTHH:MM:SS` (UTC, multiple per day in continuous mode). `plan_date` is always calendar `YYYY-MM-DD` for grouping.
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| plan_date | string | YYYY-MM-DD |
+| plan_date | string | YYYY-MM-DD (calendar day for the plan) |
 | status | string | `proposed` · `approved` · `executing` · `completed` |
 | reflection | string? | Agent's reasoning |
 | human_notes | string? | Human notes on approval |
@@ -252,7 +259,7 @@ Autopilot daily plans. One per project per day.
 | outcome_summary | map? | `{completed: N, in_review: N, failed: N, cancelled: N}` |
 
 **Access:**
-- Get: `GetItem(pk=PROJECT#id, sk=PLAN#date)`
+- Get: `GetItem(pk=PROJECT#id, sk=PLAN#<suffix>)` — suffix is date or `YYYY-MM-DDTHH:MM:SS`
 - List: `Query pk, sk begins_with "PLAN#"` — `ScanIndexForward=false, Limit=14`
 
 ---

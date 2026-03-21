@@ -22,6 +22,18 @@ function getInstanceId(): string {
   );
 }
 
+function shouldTriggerProposePlan(item: Record<string, unknown>): boolean {
+  if (item.autopilot !== true || !item.project_id) return false;
+  const mode =
+    (item.autopilot_mode as string) === "continuous" ? "continuous" : "daily";
+  if (mode === "continuous") {
+    if (item.cycle_paused === true) return false;
+    return true;
+  }
+  const hour = new Date().getUTCHours();
+  return hour === 7;
+}
+
 async function listActiveAutopilotProjectIds(): Promise<string[]> {
   const ids: string[] = [];
   let lastKey: Record<string, unknown> | undefined;
@@ -36,7 +48,7 @@ async function listActiveAutopilotProjectIds(): Promise<string[]> {
       }),
     );
     for (const item of resp.Items ?? []) {
-      if (item.autopilot === true && item.project_id) {
+      if (shouldTriggerProposePlan(item as Record<string, unknown>)) {
         ids.push(item.project_id as string);
       }
     }
@@ -72,7 +84,7 @@ async function triggerProposePlan(projectId: string): Promise<void> {
 
 export async function handler(): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
-  console.log(`Autopilot plan Lambda running (UTC date ${today})`);
+  console.log(`Autopilot plan Lambda running (UTC date ${today}, hourly)`);
 
   const projectIds = await listActiveAutopilotProjectIds();
   console.log(`Found ${projectIds.length} active autopilot project(s)`);

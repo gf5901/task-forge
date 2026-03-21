@@ -20,10 +20,10 @@ web.py          — FastAPI app: JSON API (/api/*), SPA serving, auth middleware
 bot.py          — Discord bot with slash commands (discord.py)
 task_store.py   — Shared task types (Task, enums, Comment)
 dynamo_store.py — DynamoDB-backed task store (`DynamoTaskStore`)
-projects_dynamo.py — DynamoDB helpers for project records (get_project, update_project, directives, PLAN# daily plans, MEMORY# agent notes; `resolve_memory_by_ref` for CLI lookup by sk/suffix)
+projects_dynamo.py — DynamoDB helpers for project records (get_project, update_project, directives, PLAN# plans (date or UTC datetime suffix), MEMORY# agent notes; `resolve_memory_by_ref` for CLI lookup by sk/suffix)
 objectives.py   — Daily KPI cycle: lean prompt + `./ctx` CLI + optional read-only repo worktree; `run_daily_cycle()`
 context_cli.py  — Dynamo-backed context tool for agents (`./ctx spec|kpis|snapshots|tasks|proposals|human-tasks|plans|memory`); also exports `write_ctx_script()` to inject `./ctx` into any agent working dir
-autopilot.py    — Daily autopilot plan proposal: lean prompt + `./ctx` CLI (`propose_daily_plan`; EC2 `run_task.py --propose-plan`)
+autopilot.py    — Autopilot plan proposal (daily vs continuous): lean prompt + `./ctx` CLI (`propose_daily_plan`; EC2 `run_task.py --propose-plan [--regenerate] [--plan-suffix]`)
 pipeline.py     — Task orchestration: plan → execute → PR → cleanup; run_directive() for project directives
 runner.py       — Entry point: slot locking, signal handling, delegates to pipeline
 agent.py        — Agent CLI execution, output parsing, prompt building (includes project context injection)
