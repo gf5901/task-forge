@@ -6,6 +6,7 @@ Deploy-time values are **not** committed to the repo. Set them in the environmen
 
 | Variable | Example | Purpose |
 |----------|---------|---------|
+| `SST_APP_NAME` | `agent-task-bot` | SST/Pulumi app (stack) name — must match the deployed stack. Defaults to `agent-task-bot`. |
 | `SST_API_DOMAIN` | `api.agent.example.com` | Custom domain for the Lambda API (API Gateway HTTP API) |
 | `SST_DNS_ZONE_ID` | `Z1234567890ABC` | Route 53 hosted zone ID for DNS validation |
 | `SST_ACM_CERT_ARN` | `arn:aws:acm:us-west-2:123456789012:certificate/...` | ACM certificate ARN (same region as the API, or as required by SST) |

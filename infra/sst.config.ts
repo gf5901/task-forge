@@ -3,7 +3,7 @@
 export default $config({
   app(input) {
     return {
-      name: "task-forge",
+      name: process.env.SST_APP_NAME ?? "agent-task-bot",
       removal: input?.stage === "production" ? "retain" : "remove",
       home: "aws",
       providers: {

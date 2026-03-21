@@ -66,6 +66,7 @@ The API exposes `POST /api/projects/generate-spec` (JWT required when auth is on
 | Watchdog | `sst.aws.Cron` | Health check every 5 min |
 | Digest | `sst.aws.Cron` | Daily Discord summary at 14:00 UTC |
 | Metrics | `sst.aws.Cron` | Daily KPI collection at 06:00 UTC |
+| AutopilotPlan | `sst.aws.Cron` | Hourly autopilot plan trigger (continuous projects every hour; daily-mode projects filtered to 07 UTC in Lambda) |
 | RepoScanner | `sst.aws.Cron` | Hourly GitHub issue → task sync (if `SST_SCAN_REPOS` / token configured) |
 
 ## Troubleshooting
@@ -75,6 +76,7 @@ The API exposes `POST /api/projects/generate-spec` (JWT required when auth is on
 - **Timeout on deploy**: SST plugin downloads can be slow on first run (~2 GB); subsequent deploys are faster
 - **Secret not found**: Set it with `npx sst secret set` before deploying
 - **Missing SST_* errors**: Fill in `infra/.env` per `docs/infra-deploy.md`
+- **"Table already exists" / "Domain name already exists"**: The `SST_APP_NAME` doesn't match the deployed stack. Production uses `agent-task-bot`. Set `SST_APP_NAME=agent-task-bot` in `infra/.env`.
 
 ## Post-Deploy Verification
 
