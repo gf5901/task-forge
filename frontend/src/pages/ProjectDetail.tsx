@@ -875,35 +875,34 @@ export default function ProjectDetail() {
                     </div>
                   </>
                 ) : (
-                  <p className="text-[12px] text-zinc-500">
-                    Continuous mode auto-approves new plans. Use Regenerate if this plan is still
-                    proposed.
-                  </p>
+                  <div className="space-y-2">
+                    <p className="text-[12px] text-zinc-500">
+                      Continuous mode auto-approves new plans. Use Regenerate to re-propose.
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1 border-zinc-700"
+                      disabled={planActionLoading || !projectId}
+                      onClick={async () => {
+                        if (!projectId) return
+                        setPlanActionLoading(true)
+                        try {
+                          await regeneratePlan(projectId, focusedPlanId)
+                          toast.success("Regeneration started — refresh shortly")
+                          await load()
+                        } catch (e) {
+                          toast.error(e instanceof Error ? e.message : "Regenerate failed")
+                        } finally {
+                          setPlanActionLoading(false)
+                        }
+                      }}
+                    >
+                      <RotateCcw className="size-3.5" />
+                      Regenerate
+                    </Button>
+                  </div>
                 )}
-                {project.autopilot_mode === "continuous" && todayPlan.status === "proposed" ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="gap-1 border-zinc-700"
-                    disabled={planActionLoading || !projectId}
-                    onClick={async () => {
-                      if (!projectId) return
-                      setPlanActionLoading(true)
-                      try {
-                        await regeneratePlan(projectId, focusedPlanId)
-                        toast.success("Regeneration started — refresh shortly")
-                        await load()
-                      } catch (e) {
-                        toast.error(e instanceof Error ? e.message : "Regenerate failed")
-                      } finally {
-                        setPlanActionLoading(false)
-                      }
-                    }}
-                  >
-                    <RotateCcw className="size-3.5" />
-                    Regenerate
-                  </Button>
-                ) : null}
               </div>
             ) : todayPlan.status === "approved" ? (
               <div className="space-y-2">

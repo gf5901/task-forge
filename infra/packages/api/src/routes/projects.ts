@@ -163,6 +163,12 @@ projects.patch("/projects/:id", async (c) => {
   if (body.autopilot_mode !== undefined) {
     updates.autopilot_mode =
       body.autopilot_mode === "continuous" ? "continuous" : "daily";
+    if (body.autopilot_mode !== "continuous") {
+      updates.cycle_started_at = "";
+      updates.cycle_paused = false;
+      updates.cycle_pause_reason = "";
+      updates.next_check_at = "";
+    }
   }
   if (body.cycle_max_hours !== undefined) {
     const n = Number(body.cycle_max_hours);
@@ -460,6 +466,9 @@ projects.post("/projects/:id/cycle/stop", async (c) => {
   const projectId = c.req.param("id");
   const p = await db.getProject(projectId);
   if (!p) return c.json({ error: "not found" }, 404);
+  if (p.autopilot_mode !== "continuous") {
+    return c.json({ error: "cycle controls require autopilot_mode continuous" }, 400);
+  }
   await db.updateProject(projectId, {
     cycle_paused: true,
     cycle_pause_reason: "manual",

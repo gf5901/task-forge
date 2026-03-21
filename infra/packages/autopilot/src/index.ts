@@ -28,6 +28,8 @@ function shouldTriggerProposePlan(item: Record<string, unknown>): boolean {
     (item.autopilot_mode as string) === "continuous" ? "continuous" : "daily";
   if (mode === "continuous") {
     if (item.cycle_paused === true) return false;
+    const started = (item.cycle_started_at as string) ?? "";
+    if (!started.trim()) return false;
     return true;
   }
   const hour = new Date().getUTCHours();

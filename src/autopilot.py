@@ -345,12 +345,6 @@ def _normalize_items(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def _dynamo_items_to_normalized(raw: Any) -> List[Dict[str, Any]]:
-    if not isinstance(raw, list):
-        return []
-    return _normalize_items(raw)
-
-
 def _auto_approve_plan(
     store: Any,
     project_id: str,
@@ -430,7 +424,7 @@ def propose_daily_plan(
         mode = "daily"
 
     if mode == "daily":
-        if datetime.now(timezone.utc).hour != 7:
+        if datetime.now(timezone.utc).hour != 7 and not regenerate:
             log.info("autopilot: daily mode — skip (not 07:00 UTC)")
             return True
     else:
@@ -508,10 +502,9 @@ def propose_daily_plan(
         if (
             prior
             and prior[0].get("status") == "proposed"
-            and not regenerate
         ):
             raw_items = prior[0].get("items") or []
-            items_rec = _dynamo_items_to_normalized(raw_items)
+            items_rec = _normalize_items(raw_items)
             if items_rec:
                 suf = (prior[0].get("sk") or "").replace("PLAN#", "", 1)
                 log.info("autopilot: recovering stranded proposed plan %s", suf)
@@ -699,10 +692,6 @@ def propose_daily_plan(
     )
 
     if mode == "continuous":
-        fresh = get_plan(project_id, new_suffix)
-        if fresh:
-            norm = _dynamo_items_to_normalized(fresh.get("items"))
-            if norm:
-                _auto_approve_plan(store, project_id, proj, new_suffix, norm)
+        _auto_approve_plan(store, project_id, proj, new_suffix, items)
 
     return True
