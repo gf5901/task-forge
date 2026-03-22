@@ -255,6 +255,19 @@ projects.post("/projects/:id/directive", async (c) => {
   return c.json({ ok: true, directive });
 });
 
+// POST /projects/:id/directive/dismiss — clear stuck directive so autopilot can proceed
+projects.post("/projects/:id/directive/dismiss", async (c) => {
+  const p = await db.getProject(c.req.param("id"));
+  if (!p) return c.json({ error: "not found" }, 404);
+  if (!p.active_directive_sk) {
+    return c.json({ error: "no active directive to dismiss" }, 400);
+  }
+  await db.updateProject(p.id, {
+    awaiting_next_directive: true,
+  });
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
