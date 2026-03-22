@@ -21,7 +21,7 @@ bot.py          — Discord bot with slash commands (discord.py)
 task_store.py   — Shared task types (Task, enums, Comment)
 dynamo_store.py — DynamoDB-backed task store (`DynamoTaskStore`)
 projects_dynamo.py — DynamoDB helpers for project records (get_project, update_project, directives, PLAN# plans (date or UTC datetime suffix), MEMORY# agent notes, CHAT# project PM thread, `reply_pending`, `post_system_message`; `resolve_memory_by_ref` for CLI lookup by sk/suffix)
-pm_agent.py     — Project-level PM chat: `run_pm_reply()` with `./ctx` + JSON actions (`run_task.py --pm-reply <project_id>`)
+pm_agent.py     — Project-level PM sweep (hourly via Autopilot Lambda): processes queued chat messages + reviews human-assigned tasks with pending replies in one session; `run_pm_reply()` with `./ctx` + JSON actions (`run_task.py --pm-reply <project_id>`)
 objectives.py   — Daily KPI cycle: lean prompt + `./ctx` CLI + optional read-only repo worktree; `run_daily_cycle()`
 context_cli.py  — Dynamo-backed context tool for agents (`./ctx spec|kpis|snapshots|tasks|proposals|human-tasks|plans|memory`); also exports `write_ctx_script()` to inject `./ctx` into any agent working dir
 autopilot.py    — Autopilot plan proposal (daily vs continuous): lean prompt + `./ctx` CLI (`propose_daily_plan`; EC2 `run_task.py --propose-plan [--regenerate] [--plan-suffix]`)

@@ -28,8 +28,17 @@ function shouldTriggerProposePlan(item: Record<string, unknown>): boolean {
   return hour === 7;
 }
 
-async function listActiveAutopilotProjectIds(): Promise<string[]> {
-  const ids: string[] = [];
+function shouldTriggerPmSweep(item: Record<string, unknown>): boolean {
+  if (!item.project_id) return false;
+  return item.reply_pending === true;
+}
+
+async function listActiveProjects(): Promise<{
+  autopilotIds: string[];
+  pmSweepIds: string[];
+}> {
+  const autopilotIds: string[] = [];
+  const pmSweepIds: string[] = [];
   let lastKey: Record<string, unknown> | undefined;
   do {
     const resp = await ddb.send(
@@ -42,13 +51,17 @@ async function listActiveAutopilotProjectIds(): Promise<string[]> {
       }),
     );
     for (const item of resp.Items ?? []) {
-      if (shouldTriggerProposePlan(item as Record<string, unknown>)) {
-        ids.push(item.project_id as string);
+      const rec = item as Record<string, unknown>;
+      if (shouldTriggerProposePlan(rec)) {
+        autopilotIds.push(rec.project_id as string);
+      }
+      if (shouldTriggerPmSweep(rec)) {
+        pmSweepIds.push(rec.project_id as string);
       }
     }
     lastKey = resp.LastEvaluatedKey;
   } while (lastKey);
-  return ids;
+  return { autopilotIds, pmSweepIds };
 }
 
 async function triggerProposePlan(projectId: string): Promise<void> {
@@ -76,18 +89,56 @@ async function triggerProposePlan(projectId: string): Promise<void> {
   console.log(`Triggered autopilot propose-plan for project ${projectId}`);
 }
 
+async function triggerPmSweep(projectId: string): Promise<void> {
+  const instanceId = await resolveInstanceId();
+  if (!instanceId) {
+    console.warn("Could not resolve EC2 instance — skipping PM sweep trigger");
+    return;
+  }
+  const esc = (s: string) => s.replace(/'/g, "'\\''");
+  await ssm.send(
+    new SendCommandCommand({
+      InstanceIds: [instanceId],
+      DocumentName: "AWS-RunShellScript",
+      Parameters: {
+        commands: [
+          `sudo -u ec2-user setsid ${VENV_PYTHON} ${RUN_TASK_SCRIPT} --pm-reply '${esc(
+            projectId,
+          )}' >/dev/null 2>&1 &`,
+        ],
+        workingDirectory: [WORK_DIR],
+      },
+      TimeoutSeconds: 600,
+    }),
+  );
+  console.log(`Triggered PM sweep for project ${projectId}`);
+}
+
 export async function handler(): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
   console.log(`Autopilot plan Lambda running (UTC date ${today}, hourly)`);
 
-  const projectIds = await listActiveAutopilotProjectIds();
-  console.log(`Found ${projectIds.length} active autopilot project(s)`);
+  const { autopilotIds, pmSweepIds } = await listActiveProjects();
+  console.log(
+    `Found ${autopilotIds.length} autopilot project(s), ${pmSweepIds.length} project(s) needing PM sweep`,
+  );
 
-  for (const id of projectIds) {
+  for (const id of autopilotIds) {
     try {
       await triggerProposePlan(id);
     } catch (err) {
       console.error(`Failed to trigger propose-plan for ${id}:`, err);
+    }
+  }
+
+  for (const id of pmSweepIds) {
+    if (autopilotIds.includes(id)) {
+      console.log(`PM sweep for ${id} — project already triggered for autopilot, triggering PM separately`);
+    }
+    try {
+      await triggerPmSweep(id);
+    } catch (err) {
+      console.error(`Failed to trigger PM sweep for ${id}:`, err);
     }
   }
 

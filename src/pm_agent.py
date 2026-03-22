@@ -17,6 +17,7 @@ from .projects_dynamo import (
     list_chat_messages,
 )
 from .roles import ROLES
+from .task_store import TaskStatus
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ Target repo: {target_repo}
 ## Recent chat (oldest first)
 {chat_block}
 
+{human_tasks_block}\
 ## Available tools
 Load context on demand from this directory:
   ./ctx spec                          # Full project spec (markdown)
@@ -116,12 +118,16 @@ Load context on demand from this directory:
 {role_list}
 
 ## Your task
-Respond to the human's latest message in the chat. Use ./ctx when you need facts you do not \
-already have. You may create work by returning structured fields in your JSON response.
+Review the chat and any human tasks with pending replies below. Use ./ctx when you need facts \
+you do not already have. You may create work by returning structured fields in your JSON response.
+
+For human tasks with pending replies: the human has responded to a task you previously assigned. \
+Review their response. If it fully addresses the task, include it in "complete_tasks". If it \
+needs more information, include it in "reply_to_tasks" with a follow-up question.
 
 Respond ONLY with valid JSON (no markdown fences, no extra text):
 {{
-  "reply": "markdown message to the human (required)",
+  "reply": "markdown message to the human in the chat thread (required, even if empty string)",
   "create_agent_tasks": [
     {{
       "title": "short imperative title",
@@ -136,25 +142,50 @@ Respond ONLY with valid JSON (no markdown fences, no extra text):
       "description": "clear acceptance criteria",
       "priority": "low|medium|high|urgent"
     }}
+  ],
+  "complete_tasks": ["task_id1", "task_id2"],
+  "reply_to_tasks": [
+    {{
+      "task_id": "the task id",
+      "comment": "your follow-up question or acknowledgement"
+    }}
   ]
 }}
-Use empty arrays [] if you are not creating tasks. The "reply" field is always required.
+Use empty arrays [] for any field you are not using. The "reply" field is always required \
+(use "" if you have nothing to say in chat but are acting on tasks).
 """
 )
 
 
 def run_pm_reply(store: Any, project_id: str) -> bool:
-    """Handle one PM chat turn: claim, run agent in ctx dir, parse JSON, create tasks, post reply."""
+    """Handle one PM sweep: chat replies + human-task review in a single agent session."""
     proj = get_project(project_id)
     if not proj:
         log.warning("pm_reply: project %s not found", project_id)
         return False
-    if not proj.get("reply_pending"):
-        log.info("pm_reply: reply_pending false for project %s — skip", project_id)
+
+    has_chat = bool(proj.get("reply_pending"))
+    human_tasks = store.list_human_reply_pending_for_project(project_id)
+
+    if not has_chat and not human_tasks:
+        log.info("pm_reply: nothing to do for project %s", project_id)
         return False
 
-    if not claim_project_pm_reply(project_id):
+    # Claim the chat reply_pending if set (atomic guard against concurrent runs).
+    if has_chat and not claim_project_pm_reply(project_id):
         log.info("pm_reply: lost claim race for project %s", project_id)
+        has_chat = False
+
+    # Clear reply_pending on each human task we're about to process.
+    claimed_tasks = []  # type: List[Any]
+    for ht in human_tasks:
+        store.set_reply_pending(ht.id, False)
+        ht_refreshed = store.get(ht.id)
+        if ht_refreshed and not ht_refreshed.reply_pending:
+            claimed_tasks.append(ht_refreshed)
+
+    if not has_chat and not claimed_tasks:
+        log.info("pm_reply: lost all claims for project %s", project_id)
         return False
 
     proj = get_project(project_id)
@@ -164,16 +195,8 @@ def run_pm_reply(store: Any, project_id: str) -> bool:
     title = str(proj.get("title", "Project"))
     target_repo = str(proj.get("target_repo", "") or "(not set)").strip() or "(not set)"
     messages = list_chat_messages(project_id, limit=30)
-    if not messages:
-        log.info("pm_reply: no chat messages for project %s", project_id)
-        add_chat_message(
-            project_id,
-            "pm-agent",
-            "I did not find a message to respond to.",
-        )
-        return True
 
-    lines = []
+    lines = []  # type: List[str]
     for m in messages:
         author = str(m.get("author", ""))
         body = str(m.get("body", "")).strip()
@@ -181,10 +204,33 @@ def run_pm_reply(store: Any, project_id: str) -> bool:
         lines.append("- (%s) **%s**\n  %s" % (ts, author, body))
     chat_block = "\n".join(lines) if lines else "(no messages)"
 
+    # Build human tasks context block
+    ht_lines = []  # type: List[str]
+    for ht in claimed_tasks:
+        comments = store.get_comments(ht.id)
+        user_comments = [c for c in comments if c.author != "agent"]
+        latest_comment = user_comments[-1].body if user_comments else "(no reply yet)"
+        ht_lines.append(
+            "- **[%s]** %s (status: %s)\n"
+            "  Description: %s\n"
+            "  Human's latest reply: %s"
+            % (ht.id, ht.title, ht.status.value, (ht.description or "")[:300], latest_comment)
+        )
+
+    if ht_lines:
+        human_tasks_block = (
+            "## Human tasks awaiting your review\n"
+            "These are tasks you previously assigned to the human. They have responded.\n"
+            "%s\n\n" % "\n".join(ht_lines)
+        )
+    else:
+        human_tasks_block = ""
+
     prompt = PM_AGENT_PROMPT.format(
         title=title,
         target_repo=target_repo,
         chat_block=chat_block,
+        human_tasks_block=human_tasks_block,
         role_list=_build_role_list(),
     )
 
@@ -280,6 +326,40 @@ def run_pm_reply(store: Any, project_id: str) -> bool:
                 extras.append("Assigned you a task: **%s**" % norm["title"][:80])
             except Exception:
                 log.warning("pm_reply: could not create human task", exc_info=True)
+
+        # Process task completions
+        complete_ids = parsed.get("complete_tasks", [])
+        if not isinstance(complete_ids, list):
+            complete_ids = []
+        claimed_ids = {ht.id for ht in claimed_tasks}
+        for tid in complete_ids:
+            tid = str(tid).strip()
+            if tid not in claimed_ids:
+                log.warning("pm_reply: agent tried to complete task %s not in claimed set", tid)
+                continue
+            try:
+                store.update_status(tid, TaskStatus.COMPLETED)
+                store.add_comment(tid, "pm-agent", "Marked complete by PM — response accepted.")
+                extras.append("Completed task: **%s**" % tid)
+            except Exception:
+                log.warning("pm_reply: could not complete task %s", tid, exc_info=True)
+
+        # Process task replies (follow-up questions)
+        reply_items = parsed.get("reply_to_tasks", [])
+        if not isinstance(reply_items, list):
+            reply_items = []
+        for ri in reply_items:
+            if not isinstance(ri, dict):
+                continue
+            tid = str(ri.get("task_id", "")).strip()
+            comment = str(ri.get("comment", "")).strip()
+            if not tid or not comment or tid not in claimed_ids:
+                continue
+            try:
+                store.add_comment(tid, "pm-agent", comment)
+                extras.append("Replied to task: **%s**" % tid)
+            except Exception:
+                log.warning("pm_reply: could not reply to task %s", tid, exc_info=True)
     else:
         reply_body = agent_text.strip()
 
@@ -289,7 +369,8 @@ def run_pm_reply(store: Any, project_id: str) -> bool:
     if extras:
         reply_body += "\n\n---\n" + "\n".join(extras)
 
-    add_chat_message(project_id, "pm-agent", reply_body)
+    if reply_body:
+        add_chat_message(project_id, "pm-agent", reply_body)
     plog(
         project_id,
         "pm_reply_done",

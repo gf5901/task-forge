@@ -166,7 +166,7 @@ Project metadata. `id` is 8-char hex.
 | cycle_pause_reason | string? | `time_expired` · `blocked` · `failures` · `manual` |
 | cycle_feedback | string? | Human notes for next planner pass |
 | next_check_at | string? | Agent-requested deferral (ISO); empty if none |
-| reply_pending | bool? | When true, EC2 poller runs `run_task.py --pm-reply` for project-level PM chat |
+| reply_pending | bool? | When true, hourly Autopilot Lambda triggers `run_task.py --pm-reply` via SSM for project-level PM chat |
 
 **GSI:** project-list-index (`proj_status`, `project_updated`).
 
