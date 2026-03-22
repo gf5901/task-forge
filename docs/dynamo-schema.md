@@ -255,6 +255,23 @@ Durable notes written by the daily-cycle agent via `./ctx memory save` (max 50 p
 
 ---
 
+### DOC — `pk=PROJECT#{id}  sk=DOC#<slug>`
+
+Human-managed project documents for non-repo knowledge (infra references, credentials inventory, business context). Agents read via `./ctx docs [slug]`. No TTL; no max count.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| title | string | Human-readable document title |
+| content | string | Markdown body (max 50000 chars) |
+| created_at | string | ISO 8601 |
+| updated_at | string | ISO 8601 |
+
+**Slug format:** lowercase alphanumeric, hyphens, underscores; 1–63 chars (`/^[a-z0-9][a-z0-9_-]{0,62}$/`).
+
+**Access:** `Query pk, sk begins_with "DOC#"` — `ScanIndexForward=true` for alphabetical. `GetItem(pk, DOC#<slug>)` for single doc.
+
+---
+
 ### PLAN (Autopilot Plan) — `pk=PROJECT#{id}  sk=PLAN#…`
 
 Autopilot plans. Sort key is either legacy `PLAN#YYYY-MM-DD` (one per calendar day) or `PLAN#YYYY-MM-DDTHH:MM:SS` (UTC, multiple per day in continuous mode). `plan_date` is always calendar `YYYY-MM-DD` for grouping.

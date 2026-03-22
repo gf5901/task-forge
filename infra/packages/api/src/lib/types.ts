@@ -187,3 +187,11 @@ export interface Role {
   label: string;
   prompt: string;
 }
+
+export interface ProjectDoc {
+  slug: string;
+  title: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}

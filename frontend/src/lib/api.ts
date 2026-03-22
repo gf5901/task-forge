@@ -11,6 +11,7 @@ import type {
   DailyPlan,
   PlanItem,
   ProjectChatMessage,
+  ProjectDoc,
 } from "./types"
 
 const BASE = (import.meta.env.VITE_API_BASE_URL ?? "") + "/api"
@@ -435,4 +436,36 @@ export async function reviewAutopilotCycle(
     method: "POST",
     body: JSON.stringify(opts),
   })
+}
+
+// ---------------------------------------------------------------------------
+// Project Docs
+// ---------------------------------------------------------------------------
+
+export async function fetchProjectDocs(projectId: string) {
+  return request<{ docs: ProjectDoc[] }>(`/projects/${projectId}/docs`)
+}
+
+export async function fetchProjectDoc(projectId: string, slug: string) {
+  return request<{ doc: ProjectDoc }>(
+    `/projects/${projectId}/docs/${encodeURIComponent(slug)}`,
+  )
+}
+
+export async function putProjectDoc(
+  projectId: string,
+  slug: string,
+  data: { title: string; content: string },
+) {
+  return request<{ doc: ProjectDoc }>(
+    `/projects/${projectId}/docs/${encodeURIComponent(slug)}`,
+    { method: "PUT", body: JSON.stringify(data) },
+  )
+}
+
+export async function deleteProjectDoc(projectId: string, slug: string) {
+  return request<{ ok: boolean }>(
+    `/projects/${projectId}/docs/${encodeURIComponent(slug)}`,
+    { method: "DELETE" },
+  )
 }

@@ -4,6 +4,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -27,6 +28,7 @@ import type {
   PlanItem,
   PlanStatus,
   ProjectChatMessage,
+  ProjectDoc,
 } from "./types.js";
 
 const TABLE_NAME = process.env.DYNAMO_TABLE ?? "agent-tasks";
@@ -1003,6 +1005,92 @@ export async function addProjectChatMessage(
     message: { author: auth, body: trimmed, created_at: now },
     reply_pending: replyPending,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Project docs (DOC#<slug>)
+// ---------------------------------------------------------------------------
+
+const DOC_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+
+export function isValidDocSlug(s: string): boolean {
+  return DOC_SLUG_RE.test(s);
+}
+
+function itemToProjectDoc(item: Record<string, unknown>): ProjectDoc {
+  const sk = (item.sk as string) ?? "";
+  return {
+    slug: sk.replace(/^DOC#/, ""),
+    title: (item.title as string) ?? "",
+    content: (item.content as string) ?? "",
+    created_at: (item.created_at as string) ?? "",
+    updated_at: (item.updated_at as string) ?? "",
+  };
+}
+
+export async function listProjectDocs(
+  projectId: string,
+): Promise<ProjectDoc[]> {
+  const resp = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :d)",
+      ExpressionAttributeValues: {
+        ":pk": projectPk(projectId),
+        ":d": "DOC#",
+      },
+      ScanIndexForward: true,
+    }),
+  );
+  return (resp.Items ?? []).map(itemToProjectDoc);
+}
+
+export async function getProjectDoc(
+  projectId: string,
+  slug: string,
+): Promise<ProjectDoc | null> {
+  const resp = await ddb.send(
+    new GetCommand({
+      TableName: TABLE_NAME,
+      Key: { pk: projectPk(projectId), sk: `DOC#${slug}` },
+    }),
+  );
+  return resp.Item ? itemToProjectDoc(resp.Item) : null;
+}
+
+export async function putProjectDoc(
+  projectId: string,
+  slug: string,
+  title: string,
+  content: string,
+): Promise<ProjectDoc> {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00");
+  const existing = await getProjectDoc(projectId, slug);
+  const item: Record<string, unknown> = {
+    pk: projectPk(projectId),
+    sk: `DOC#${slug}`,
+    title: (title || slug).trim(),
+    content: (content || "").slice(0, 50000),
+    updated_at: now,
+    created_at: existing?.created_at || now,
+  };
+  await ddb.send(new PutCommand({ TableName: TABLE_NAME, Item: item }));
+  return itemToProjectDoc(item);
+}
+
+export async function deleteProjectDoc(
+  projectId: string,
+  slug: string,
+): Promise<boolean> {
+  const existing = await getProjectDoc(projectId, slug);
+  if (!existing) return false;
+  await ddb.send(
+    new DeleteCommand({
+      TableName: TABLE_NAME,
+      Key: { pk: projectPk(projectId), sk: `DOC#${slug}` },
+    }),
+  );
+  return true;
 }
 
 export async function deleteProject(projectId: string): Promise<boolean> {

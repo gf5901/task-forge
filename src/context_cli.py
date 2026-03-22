@@ -14,7 +14,9 @@ from typing import Any, Dict, List, Optional
 
 from src.dynamo_store import DynamoTaskStore
 from src.projects_dynamo import (
+    get_doc,
     get_project,
+    list_docs,
     list_memories,
     list_plans,
     list_proposals,
@@ -322,6 +324,40 @@ def cmd_memory_get(project_id: str, memory_ref: str) -> int:
         return 1
 
 
+def cmd_docs_list(project_id: str) -> int:
+    try:
+        items = list_docs(project_id)
+        if not items:
+            print("(no docs)")
+            return 0
+        for it in items:
+            slug = str(it.get("sk", "")).replace("DOC#", "", 1)
+            title = it.get("title", slug)
+            updated = it.get("updated_at", "")
+            content = (it.get("content") or "").replace("\n", " ")
+            preview = content[:120] + ("…" if len(content) > 120 else "")
+            print("- %s (%s) [%s] %s" % (slug, title, updated, preview))
+        return 0
+    except Exception as e:
+        _err(str(e))
+        return 1
+
+
+def cmd_docs_get(project_id: str, slug: str) -> int:
+    try:
+        it = get_doc(project_id, slug)
+        if not it:
+            _err("doc '%s' not found (use ./ctx docs to list)" % slug)
+            return 1
+        print("# %s" % it.get("title", slug))
+        print("")
+        print(it.get("content", ""))
+        return 0
+    except Exception as e:
+        _err(str(e))
+        return 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     parser = argparse.ArgumentParser(description="Daily cycle context tool")
@@ -361,6 +397,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_mg = mem_sub.add_parser("get", help="Get one memory by sk or suffix")
     p_mg.add_argument("memory_id")
 
+    p_docs = sub.add_parser("docs", help="Project docs (list or get by slug)")
+    p_docs.add_argument("slug", nargs="?", default="", help="Doc slug to retrieve (omit to list)")
+
     args = parser.parse_args(argv)
     project_id = _resolve_project_id(args)
     if not project_id:
@@ -395,6 +434,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             return cmd_memory_save(project_id, text, data_dir)
         if args.mem_cmd == "get":
             return cmd_memory_get(project_id, args.memory_id.strip())
+    if args.cmd == "docs":
+        slug = (args.slug or "").strip()
+        if slug:
+            return cmd_docs_get(project_id, slug)
+        return cmd_docs_list(project_id)
 
     _err("unknown command")
     return 1

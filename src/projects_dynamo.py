@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -530,6 +531,74 @@ def claim_project_pm_reply(project_id: str) -> bool:
         if code == "ConditionalCheckFailedException":
             return False
         raise
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Project docs (sk=DOC#<slug>)
+# ---------------------------------------------------------------------------
+
+DOC_CONTENT_MAX = 50000
+DOC_SLUG_RE = r"^[a-z0-9][a-z0-9_-]{0,62}$"
+
+
+def _valid_doc_slug(slug: str) -> bool:
+    return bool(re.match(DOC_SLUG_RE, slug))
+
+
+def list_docs(project_id: str) -> List[Dict[str, Any]]:
+    """Return DOC# items for a project, sorted by slug ascending."""
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    resp = table.query(
+        KeyConditionExpression=Key("pk").eq(_pk(project_id)) & Key("sk").begins_with("DOC#"),
+        ScanIndexForward=True,
+    )
+    return resp.get("Items", [])
+
+
+def get_doc(project_id: str, slug: str) -> Optional[Dict[str, Any]]:
+    """Get one doc by slug."""
+    sk = slug if slug.startswith("DOC#") else "DOC#%s" % slug
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    resp = table.get_item(Key={"pk": _pk(project_id), "sk": sk})
+    return resp.get("Item")
+
+
+def put_doc(project_id: str, slug: str, title: str, content: str) -> Dict[str, Any]:
+    """Create or overwrite a DOC#<slug> record. Returns the item."""
+    if not _valid_doc_slug(slug):
+        raise ValueError("invalid doc slug: %r" % slug)
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    text = (content or "")[:DOC_CONTENT_MAX]
+    item = {
+        "pk": _pk(project_id),
+        "sk": "DOC#%s" % slug,
+        "title": (title or slug).strip(),
+        "content": text,
+        "updated_at": now,
+    }
+    existing = get_doc(project_id, slug)
+    if existing and existing.get("created_at"):
+        item["created_at"] = existing["created_at"]
+    else:
+        item["created_at"] = now
+    table.put_item(Item=item)
+    return item
+
+
+def delete_doc(project_id: str, slug: str) -> bool:
+    """Delete a DOC# record. Returns True if it existed."""
+    sk = slug if slug.startswith("DOC#") else "DOC#%s" % slug
+    existing = get_doc(project_id, slug)
+    if not existing:
+        return False
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    table.delete_item(Key={"pk": _pk(project_id), "sk": sk})
     return True
 
 

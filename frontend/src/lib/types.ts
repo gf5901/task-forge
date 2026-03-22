@@ -141,6 +141,14 @@ export interface Comment {
   created_at: string
 }
 
+export interface ProjectDoc {
+  slug: string
+  title: string
+  content: string
+  created_at: string
+  updated_at: string
+}
+
 export interface Counts {
   all: number
   pending: number

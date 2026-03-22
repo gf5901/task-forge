@@ -269,6 +269,62 @@ projects.post("/projects/:id/directive/dismiss", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Project docs (DOC#<slug>)
+// ---------------------------------------------------------------------------
+
+// GET /projects/:id/docs
+projects.get("/projects/:id/docs", async (c) => {
+  const p = await db.getProject(c.req.param("id"));
+  if (!p) return c.json({ error: "not found" }, 404);
+  const docs = await db.listProjectDocs(p.id);
+  return c.json({ docs });
+});
+
+// GET /projects/:id/docs/:slug
+projects.get("/projects/:id/docs/:slug", async (c) => {
+  const p = await db.getProject(c.req.param("id"));
+  if (!p) return c.json({ error: "not found" }, 404);
+  const slug = c.req.param("slug");
+  if (!db.isValidDocSlug(slug)) {
+    return c.json({ error: "invalid slug (lowercase alphanumeric, hyphens, underscores)" }, 400);
+  }
+  const doc = await db.getProjectDoc(p.id, slug);
+  if (!doc) return c.json({ error: "doc not found" }, 404);
+  return c.json({ doc });
+});
+
+// PUT /projects/:id/docs/:slug — create or update
+projects.put("/projects/:id/docs/:slug", async (c) => {
+  const p = await db.getProject(c.req.param("id"));
+  if (!p) return c.json({ error: "not found" }, 404);
+  const slug = c.req.param("slug");
+  if (!db.isValidDocSlug(slug)) {
+    return c.json({ error: "invalid slug (lowercase alphanumeric, hyphens, underscores)" }, 400);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const content = typeof body.content === "string" ? body.content : "";
+  if (!title) {
+    return c.json({ error: "title is required" }, 400);
+  }
+  const doc = await db.putProjectDoc(p.id, slug, title, content);
+  return c.json({ doc });
+});
+
+// DELETE /projects/:id/docs/:slug
+projects.delete("/projects/:id/docs/:slug", async (c) => {
+  const p = await db.getProject(c.req.param("id"));
+  if (!p) return c.json({ error: "not found" }, 404);
+  const slug = c.req.param("slug");
+  if (!db.isValidDocSlug(slug)) {
+    return c.json({ error: "invalid slug" }, 400);
+  }
+  const deleted = await db.deleteProjectDoc(p.id, slug);
+  if (!deleted) return c.json({ error: "doc not found" }, 404);
+  return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
 
