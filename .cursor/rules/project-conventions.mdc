@@ -53,7 +53,9 @@ Tasks are stored in DynamoDB with the following fields:
 - Plan results are appended as `## Plan (timestamp)` sections
 
 ## Task Triggering
-A polling daemon (`run_poller.py`) runs on EC2 as a systemd service and checks DynamoDB every `POLL_INTERVAL` seconds (default 15) for pending tasks and `reply_pending` comments. It spawns `run_task.py` subprocesses to handle them — no SSM trigger from Lambda is needed. The Lambda API just writes to DynamoDB (e.g. sets status to `pending` or `reply_pending: true`) and returns. SSM is only used for `cancelRunner` (SIGTERM), directive decomposition, daily cycle triggers, and autopilot plan proposals.
+A polling daemon (`run_poller.py`) runs on EC2 as a systemd service and checks DynamoDB every `POLL_INTERVAL` seconds (default 15) for pending tasks and `reply_pending` comments. It spawns `run_task.py` subprocesses to handle them — no SSM trigger from Lambda is needed. The Lambda API just writes to DynamoDB (e.g. sets status to `pending` or `reply_pending: true`) and returns. SSM is used for `cancelRunner` (SIGTERM), directive decomposition, daily cycle triggers, autopilot plan proposals, and PM sweeps.
+
+**PM sweep exception:** The poller does **not** spawn PM chat replies or human-assigned task replies. These are handled by the hourly Autopilot Lambda, which triggers `run_task.py --pm-reply <project_id>` via SSM for projects with `reply_pending: true`.
 
 Up to `MAX_CONCURRENT_RUNNERS` (default 2) agents can run in parallel. Each process acquires a numbered slot lockfile (`runner.lock.0`, `runner.lock.1`, …); if all slots are occupied it exits cleanly. `run_one` claims a task by immediately flipping it to `in_progress` then re-reading to confirm it won any race — if another runner already claimed it, the process bails out.
 
@@ -79,13 +81,22 @@ Role assignment during planning: both `PLAN_PROMPT` and `PLAN_ONLY_PROMPT` inclu
 ## Comment-Triggered Agent Replies
 When a user posts a comment via `POST /api/tasks/{id}/comment`, the Lambda API sets `reply_pending: true` on the task in DynamoDB and returns. The EC2 poller (`run_poller.py`) detects `reply_pending` tasks every poll cycle and spawns `run_task.py --reply <task_id>`. `run_comment_reply` in `runner.py` clears `reply_pending` when done. The UI polls every 3s while `reply_pending` is true and shows a spinning "Agent is composing a reply…" indicator. Agent comments are styled in indigo with a bot icon. `POST /api/tasks/{id}/reply` still exists for manual triggering (sets `reply_pending: true`).
 
+**Exception — human-assigned tasks with a project:** The poller skips these. Instead, the comment API also sets `reply_pending: true` on the PROJECT record. The hourly Autopilot Lambda detects this and triggers `run_task.py --pm-reply <project_id>` via SSM, so the PM agent handles the response in its next sweep (see PM Agent Sweep below).
+
 ## Human-Assigned Tasks
-Tasks with `assignee: "human"` are for the human operator (e.g., "set up GA4 property", "provide API key"). The daily cycle creates them automatically when the agent identifies something it needs from the human. Lifecycle:
-1. Daily cycle creates task with `assignee: "human"`, `status: "pending"`
+Tasks with `assignee: "human"` are for the human operator (e.g., "set up GA4 property", "provide API key"). The daily cycle and PM agent create them automatically when the agent identifies something it needs from the human. Lifecycle:
+1. Daily cycle or PM agent creates task with `assignee: "human"`, `status: "pending"`
 2. Human sees them in "My Tasks" sidebar filter and "Your Tasks" section on ProjectDetail
-3. Human does the work and sets status to `in_review`
-4. Next daily cycle reviews: if done correctly → `completed`; if not → `pending` with an agent comment explaining what's missing
-The EC2 poller ignores `assignee: "human"` tasks (they are not picked up for agent execution). The `human` count in the API counts endpoint includes all non-terminal human-assigned tasks.
+3. Human does the work and sets status to `in_review` — or posts a comment answering the question
+4. Next PM sweep or daily cycle reviews: if done correctly → `completed`; if not → `pending` with an agent comment explaining what's missing
+The EC2 poller ignores `assignee: "human"` tasks (they are not picked up for agent execution). When a human comments on a human-assigned task with a `project_id`, the PM agent handles the reply during its hourly sweep (not the generic comment reply agent). The `human` count in the API counts endpoint includes all non-terminal human-assigned tasks.
+
+## PM Agent Sweep
+The PM agent (`src/pm_agent.py`) runs on an hourly schedule, piggybacking on the Autopilot Lambda. It does **not** respond to chat messages or human task replies immediately. Instead:
+1. Human posts a project chat message or comments on a human-assigned task → `reply_pending: true` set on the PROJECT record
+2. Hourly Autopilot Lambda detects `reply_pending` on active projects → triggers `run_task.py --pm-reply <project_id>` via SSM
+3. `run_pm_reply()` processes all queued chat messages AND reviews human-assigned tasks with pending replies in a single agent session
+4. The PM can: acknowledge human responses, mark tasks complete, post follow-up questions, create new agent/human tasks
 
 ## Web UI — React SPA + API
 
@@ -150,7 +161,7 @@ Projects are long-lived entities (`pk=PROJECT#<id>`, `sk=PROJECT`) with a title,
 `infra/packages/metrics/` — scheduled Lambda (cron `0 6 * * ? *`) fetches metrics for active projects with KPIs. Adapters: PageSpeed Insights (free, no auth), GitHub (existing token). Writes `SNAPSHOT#<date>` records to DynamoDB, updates KPI current values, triggers `run_daily_cycle` on EC2 via SSM.
 
 ### Autopilot Lambda
-`infra/packages/autopilot/` — scheduled Lambda (cron hourly) queries active projects with `autopilot: true`. **Continuous** mode (`autopilot_mode: continuous`, not `cycle_paused`): triggers `run_task.py --propose-plan` on EC2. **Daily** mode: triggers only at **07:00 UTC** (same hourly cron; filtered in Lambda). EC2 `src/autopilot.py` enforces the same rules.
+`infra/packages/autopilot/` — scheduled Lambda (cron hourly) queries active projects with `autopilot: true`. **Continuous** mode (`autopilot_mode: continuous`, not `cycle_paused`): triggers `run_task.py --propose-plan` on EC2. **Daily** mode: triggers only at **07:00 UTC** (same hourly cron; filtered in Lambda). EC2 `src/autopilot.py` enforces the same rules. The same Lambda also triggers **PM sweeps** for any active project with `reply_pending: true`, running `run_task.py --pm-reply <project_id>` via SSM. This processes queued project chat messages and reviews human-assigned tasks with pending replies in a single agent session.
 
 ### Autonomous Daily Cycle
 Projects can define KPIs (`kpis` array on the PROJECT record). When KPIs are present, the Metrics Lambda collects data daily and triggers `run_daily_cycle()` in `src/objectives.py` on EC2. The cycle: loads 14 days of snapshots + proposals + recent tasks + human tasks in review → calls the agent (opus) with a reflection prompt → parses structured JSON → creates PROP records (proposals) and `assignee: "human"` tasks. The agent also reviews human tasks marked `in_review`, either completing them or returning them to `pending` with a comment.

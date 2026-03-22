@@ -250,6 +250,14 @@ tasks.post("/tasks/:id/comment", async (c) => {
   if (!comment) return c.json({ error: "not found" }, 404);
 
   await db.setReplyPending(c.req.param("id"), true);
+
+  // For human-assigned tasks with a project, also flag the project for PM sweep
+  // so the hourly autopilot Lambda triggers the PM to review the response.
+  const task = await db.getTask(c.req.param("id"));
+  if (task?.assignee === "human" && task?.project_id) {
+    await db.updateProject(task.project_id, { reply_pending: true });
+  }
+
   return c.json({
     author: comment.author,
     body: comment.body,

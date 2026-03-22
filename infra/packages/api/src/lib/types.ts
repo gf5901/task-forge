@@ -87,7 +87,7 @@ export interface Project {
   cycle_feedback: string;
   /** Agent-requested “check back after” time (ISO); empty if none */
   next_check_at: string;
-  /** PM chat: EC2 poller should run run_task.py --pm-reply */
+  /** PM chat: hourly Autopilot Lambda triggers run_task.py --pm-reply via SSM */
   reply_pending: boolean;
 }
 

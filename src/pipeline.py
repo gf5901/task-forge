@@ -173,6 +173,10 @@ You are continuing work on a task you previously worked on. A user has posted a 
 that requires your attention. You are running inside the same git worktree where you did the \
 original work, so all your previous changes are present.
 
+## Task
+**%s**
+%s
+
 ## Latest Comment (from %s)
 %s
 
@@ -180,6 +184,30 @@ original work, so all your previous changes are present.
 Respond to the comment above. If it asks you to do something, do it — you can read and edit \
 files in the worktree directly. If it asks a question, investigate and answer. If it provides \
 information, acknowledge it and take any appropriate action. Respond concisely."""
+)
+
+HUMAN_TASK_REPLY_PROMPT = (
+    SECURITY_PREFIX
+    + """\
+You are an AI assistant managing a task that was assigned to a human operator. The task asked \
+the human to provide information, make a decision, or perform an action that only a human can do. \
+The human has now replied. Your job is to acknowledge their response and help move the task forward.
+
+## Task
+**%s**
+%s
+
+## Latest Comment (from %s)
+%s
+
+## Your Instructions
+1. Acknowledge the human's response and summarise the key decisions or information they provided.
+2. If their response fully addresses the task, say so and recommend marking this task as completed.
+3. If their response is partial or raises follow-up questions, note what is still outstanding.
+4. Do NOT attempt to execute engineering work yourself (e.g. writing code, creating infrastructure, \
+making PRs). If engineering work is needed based on the human's response, suggest creating a \
+separate task for it — describe what that task should contain.
+5. Keep your reply concise and actionable."""
 )
 
 
@@ -761,6 +789,16 @@ def run_comment_reply(store, task_id):
         log.warning("Comment reply: task %s not found", task_id)
         return False
 
+    # Human-assigned tasks with a project are handled by the PM during the
+    # hourly autopilot sweep — don't process them here.
+    is_human = getattr(task, "assignee", "agent") == "human"
+    if is_human and getattr(task, "project_id", ""):
+        log.info(
+            "Comment reply: task %s is human-assigned with project — deferring to PM sweep",
+            task_id,
+        )
+        return False
+
     # Atomically claim the reply by clearing reply_pending before doing any work.
     # If reply_pending is already false another process already claimed it — bail.
     if not task.reply_pending:
@@ -782,14 +820,31 @@ def run_comment_reply(store, task_id):
 
     latest = user_comments[-1]
 
-    prompt = COMMENT_REPLY_PROMPT % (
-        latest.author,
-        latest.body,
-    )
+    desc_snippet = (task.description or "")[:500]
+    if is_human:
+        prompt = HUMAN_TASK_REPLY_PROMPT % (
+            task.title,
+            desc_snippet,
+            latest.author,
+            latest.body,
+        )
+    else:
+        prompt = COMMENT_REPLY_PROMPT % (
+            task.title,
+            desc_snippet,
+            latest.author,
+            latest.body,
+        )
 
     plog(task_id, "reply_start", "execute", "Responding to comment")
 
-    wt_path, created_fresh = _get_or_create_reply_worktree(task)
+    # Human-assigned tasks (without a project — rare fallback) always get a
+    # text-only reply in a tmpdir; they should never create code or worktrees.
+    if is_human:
+        wt_path = None
+        created_fresh = False
+    else:
+        wt_path, created_fresh = _get_or_create_reply_worktree(task)
 
     try:
         if wt_path:

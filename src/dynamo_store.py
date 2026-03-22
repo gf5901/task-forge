@@ -319,6 +319,19 @@ class DynamoTaskStore:
         """Return tasks with reply_pending=true (typically 0-1 at a time)."""
         return self._scan_meta(FilterExpression=Attr("reply_pending").eq(True))
 
+    def list_human_reply_pending_for_project(self, project_id: str) -> List[Task]:
+        """Return human-assigned tasks with reply_pending=true for a given project."""
+        if not project_id:
+            return []
+        return self._query_all(
+            IndexName="project-index",
+            KeyConditionExpression=Key("project_id").eq(project_id),
+            FilterExpression=(
+                Attr("assignee").eq("human")
+                & Attr("reply_pending").eq(True)
+            ),
+        )
+
     def delete(self, task_id: str) -> bool:
         pk = _pk(task_id)
         resp = self._table.query(

@@ -1072,6 +1072,91 @@ class TestCommentReply:
 
         assert cleanup_calls == []
 
+    def test_human_task_with_project_deferred_to_pm(self, tmp_tasks, monkeypatch):
+        """Human-assigned tasks with a project_id are deferred to the PM sweep."""
+        from src.pipeline import run_comment_reply
+
+        agent_calls = []
+
+        def counting_agent(*a, **kw):
+            import subprocess as _sp
+
+            agent_calls.append(1)
+            fake = _sp.CompletedProcess(args=[], returncode=0, stdout="reply", stderr="")
+            return fake, 1.0, "", {}
+
+        monkeypatch.setattr("src.pipeline.run_agent", counting_agent)
+
+        task = tmp_tasks.create(
+            title="Confirm DNS setup",
+            description="Please confirm DNS",
+            assignee="human",
+            project_id="proj-123",
+        )
+        tmp_tasks.add_comment(task.id, "web", "Yes, please proceed")
+        self._set_reply_pending(tmp_tasks, task.id)
+
+        result = run_comment_reply(tmp_tasks, task.id)
+        assert result is False
+        assert agent_calls == []
+        # reply_pending should still be true (not claimed)
+        assert tmp_tasks.get(task.id).reply_pending is True
+
+    def test_human_task_without_project_uses_human_prompt(self, tmp_tasks, monkeypatch):
+        """Human-assigned tasks without a project_id use the HUMAN_TASK_REPLY_PROMPT."""
+        from src.pipeline import run_comment_reply
+
+        captured = {}
+
+        def capture_agent(prompt, **kw):
+            import subprocess as _sp
+
+            captured["prompt"] = prompt
+            captured["kw"] = kw
+            fake = _sp.CompletedProcess(args=[], returncode=0, stdout="acknowledged", stderr="")
+            return fake, 1.0, "", {}
+
+        monkeypatch.setattr("src.pipeline.run_agent", capture_agent)
+
+        task = tmp_tasks.create(
+            title="Provide API key",
+            description="Please provide the GA4 API key",
+            assignee="human",
+        )
+        tmp_tasks.add_comment(task.id, "web", "Here is the key: abc123")
+        self._set_reply_pending(tmp_tasks, task.id)
+
+        result = run_comment_reply(tmp_tasks, task.id)
+        assert result is True
+        assert "assigned to a human operator" in captured["prompt"]
+        assert "Provide API key" in captured["prompt"]
+        assert "Here is the key: abc123" in captured["prompt"]
+        assert "Do NOT attempt to execute engineering work" in captured["prompt"]
+
+    def test_prompt_includes_task_context(self, tmp_tasks, monkeypatch):
+        """Both prompts now include the task title and description."""
+        from src.pipeline import run_comment_reply
+
+        captured = {}
+
+        def capture_agent(prompt, **kw):
+            import subprocess as _sp
+
+            captured["prompt"] = prompt
+            fake = _sp.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+            return fake, 1.0, "", {}
+
+        monkeypatch.setattr("src.pipeline.run_agent", capture_agent)
+
+        task = tmp_tasks.create(title="Fix the login bug", description="Users cannot log in")
+        tmp_tasks.add_comment(task.id, "web", "Still broken")
+        self._set_reply_pending(tmp_tasks, task.id)
+
+        run_comment_reply(tmp_tasks, task.id)
+
+        assert "Fix the login bug" in captured["prompt"]
+        assert "Users cannot log in" in captured["prompt"]
+
 
 class TestCancelViaStatusUpdate:
     """cancel_runner is called when PATCH /status sets cancelled."""
