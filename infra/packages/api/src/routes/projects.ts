@@ -64,6 +64,44 @@ projects.get("/projects/:id", async (c) => {
   });
 });
 
+// GET /projects/:id/chat
+projects.get("/projects/:id/chat", async (c) => {
+  const limitRaw = c.req.query("limit");
+  const limit = Math.min(
+    100,
+    Math.max(1, parseInt(limitRaw ?? "50", 10) || 50)
+  );
+  const data = await db.getProjectChat(c.req.param("id"), limit);
+  if (!data) return c.json({ error: "not found" }, 404);
+  return c.json({
+    messages: data.messages,
+    reply_pending: data.reply_pending,
+  });
+});
+
+// POST /projects/:id/chat
+projects.post("/projects/:id/chat", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const text = typeof body.body === "string" ? body.body : "";
+  if (!text.trim()) return c.json({ error: "body is required" }, 400);
+  const author =
+    typeof body.author === "string" && body.author.trim()
+      ? body.author.trim()
+      : "web";
+  const requestPmReply = body.request_pm_reply !== false;
+  const result = await db.addProjectChatMessage(
+    c.req.param("id"),
+    author,
+    text,
+    requestPmReply
+  );
+  if (!result) return c.json({ error: "not found" }, 404);
+  return c.json({
+    message: result.message,
+    reply_pending: result.reply_pending,
+  });
+});
+
 // GET /projects/:id/directives
 projects.get("/projects/:id/directives", async (c) => {
   const p = await db.getProject(c.req.param("id"));

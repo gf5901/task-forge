@@ -39,6 +39,26 @@ from .worktree import (
 
 log = logging.getLogger(__name__)
 
+
+def _notify_pm_chat_task_terminal(task, status_label: str) -> None:
+    # type: (Any, str) -> None
+    """Post a system line to project PM chat when a task with project_id finishes."""
+    pid = (getattr(task, "project_id", None) or "").strip()
+    if not pid:
+        return
+    try:
+        from .projects_dynamo import post_system_message
+
+        tid = getattr(task, "id", "")
+        title = (getattr(task, "title", "") or "").strip() or tid
+        post_system_message(
+            pid,
+            "Task **%s** (`%s`) → %s" % (title[:200], tid, status_label),
+        )
+    except Exception:
+        log.debug("pm chat task notify failed", exc_info=True)
+
+
 AUTO_DOCS = os.getenv("AUTO_DOCS", "true").lower() == "true"
 AUTO_PR = os.getenv("AUTO_PR", "true").lower() == "true"
 AUTO_PLAN = os.getenv("AUTO_PLAN", "true").lower() == "true"
@@ -349,16 +369,19 @@ def run_plan_only(store, task):
     except subprocess.TimeoutExpired:
         log.warning("Plan-only timed out for task %s", task.id)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (plan-only timeout)")
         plog(task.id, "plan_only_timeout", "plan", "Timed out")
         return False
     except Exception:
         log.exception("Plan-only error for task %s", task.id)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (plan-only error)")
         return False
 
     if result.returncode != 0:
         log.warning("Plan-only agent failed for task %s (exit %d)", task.id, result.returncode)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (plan-only agent error)")
         plog(task.id, "plan_only_failed", "plan", "Agent failed (exit %d)" % result.returncode)
         return False
 
@@ -367,6 +390,7 @@ def run_plan_only(store, task):
     if not json_match:
         log.warning("Plan-only returned no JSON for task %s", task.id)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (no plan JSON)")
         return False
 
     try:
@@ -374,11 +398,13 @@ def run_plan_only(store, task):
     except _json.JSONDecodeError:
         log.exception("Plan-only JSON parse error for task %s", task.id)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (bad plan JSON)")
         return False
 
     if not isinstance(steps, list) or not steps:
         log.warning("Plan-only returned empty plan for task %s", task.id)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (empty plan)")
         return False
 
     parent_desc = task.description.strip() if task.description else "(no description)"
@@ -430,6 +456,10 @@ def run_plan_only(store, task):
     )
 
     store.update_status(task.id, TaskStatus.COMPLETED)
+    _notify_pm_chat_task_terminal(
+        task,
+        "**completed** (plan-only → %d subtask(s))" % len(subtasks),
+    )
     trigger_unblocked_dependents(store, task.id)
     plog(
         task.id,
@@ -874,6 +904,7 @@ def _run_one_inner(store, task):
         log.error("Task %s: %s", task.id, msg)
         _append_text_to_task(store, task, "Agent Output", "**Error:** " + msg)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (worktree error)")
         _maybe_finalize_directive_batch(store, task.id)
         plog(task.id, "worktree_failed", "worktree", msg)
         return False
@@ -1036,6 +1067,7 @@ def _run_one_inner(store, task):
                     for sub in subtasks:
                         store.update_status(sub.id, TaskStatus.FAILED)
                     store.update_status(task.id, TaskStatus.FAILED)
+                    _notify_pm_chat_task_terminal(task, "**failed** (wrong directory)")
                     _maybe_finalize_directive_batch(store, task.id)
                     log.error("Task %s: agent wrote to main checkout — marking failed", task.id)
                     plog(
@@ -1057,6 +1089,10 @@ def _run_one_inner(store, task):
             for sub in subtasks:
                 store.update_status(sub.id, final_status)
             store.update_status(task.id, final_status)
+            _notify_pm_chat_task_terminal(
+                task,
+                "**%s**" % final_status.value.replace("_", " "),
+            )
             _maybe_finalize_directive_batch(store, task.id)
             trigger_unblocked_dependents(store, task.id)
             log.info("Task %s completed (status=%s)", task.id, final_status.value)
@@ -1065,6 +1101,7 @@ def _run_one_inner(store, task):
             for sub in subtasks:
                 store.update_status(sub.id, TaskStatus.FAILED)
             store.update_status(task.id, TaskStatus.FAILED)
+            _notify_pm_chat_task_terminal(task, "**failed** (agent exit %d)" % result.returncode)
             _maybe_finalize_directive_batch(store, task.id)
             log.warning("Task %s failed (exit %d, %.1fs)", task.id, result.returncode, elapsed)
             plog(
@@ -1088,6 +1125,7 @@ def _run_one_inner(store, task):
         for sub in subtasks:
             store.update_status(sub.id, TaskStatus.FAILED)
         store.update_status(task.id, TaskStatus.FAILED)
+        _notify_pm_chat_task_terminal(task, "**failed** (timeout)")
         _maybe_finalize_directive_batch(store, task.id)
         plog(task.id, "task_timeout", "pipeline", "Timed out after %ds" % task_timeout)
 
@@ -1095,6 +1133,7 @@ def _run_one_inner(store, task):
         log.exception("Unexpected error running task %s", task.id)
         if agent_succeeded:
             store.update_status(task.id, TaskStatus.COMPLETED)
+            _notify_pm_chat_task_terminal(task, "**completed** (post-agent pipeline error)")
             _maybe_finalize_directive_batch(store, task.id)
             trigger_unblocked_dependents(store, task.id)
             _append_text_to_task(
@@ -1112,6 +1151,7 @@ def _run_one_inner(store, task):
             )
         else:
             store.update_status(task.id, TaskStatus.FAILED)
+            _notify_pm_chat_task_terminal(task, "**failed** (pipeline error)")
             _maybe_finalize_directive_batch(store, task.id)
             plog(task.id, "task_error", "pipeline", str(exc)[:200])
 

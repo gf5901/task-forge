@@ -21,6 +21,7 @@ from .projects_dynamo import (
     new_plan_suffix_utc,
     plan_date_from_suffix,
     plan_sk,
+    post_system_message,
     put_plan,
     update_plan_fields,
     update_project,
@@ -125,6 +126,13 @@ def _pause_cycle(
             "cycle_pause_reason": reason,
         },
     )
+    try:
+        post_system_message(
+            project_id,
+            "Autopilot cycle paused (%s). %s" % (reason, discord_body[:500]),
+        )
+    except Exception:
+        log.debug("pm chat autopilot pause notify failed", exc_info=True)
     title = str(proj.get("title", "Project"))
     _post_discord_embed("Autopilot paused: %s" % title, discord_body)
 
@@ -690,6 +698,14 @@ def propose_daily_plan(
         "autopilot",
         "Proposed %d item(s)" % len(items),
     )
+    try:
+        post_system_message(
+            project_id,
+            "Autopilot proposed a plan with **%d** work item(s) (`PLAN#%s`)."
+            % (len(items), new_suffix),
+        )
+    except Exception:
+        log.debug("pm chat autopilot plan notify failed", exc_info=True)
 
     if mode == "continuous":
         _auto_approve_plan(store, project_id, proj, new_suffix, items)

@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
+from botocore.exceptions import ClientError
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,10 @@ def update_project(
         names["#nc"] = "next_check_at"
         vals[":nc"] = updates["next_check_at"]
         sets.append("#nc = :nc")
+    if "reply_pending" in updates:
+        names["#rp"] = "reply_pending"
+        vals[":rp"] = bool(updates["reply_pending"])
+        sets.append("#rp = :rp")
     table.update_item(
         Key={"pk": _pk(project_id), "sk": "PROJECT"},
         UpdateExpression="SET %s" % ", ".join(sets),
@@ -455,3 +460,98 @@ def finalize_plan_batch(project_id: str, plan_sk_val: str, batch_tasks: List[Any
             "outcome_summary": counts,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Project-level PM chat (sk=CHAT#<iso>)
+# ---------------------------------------------------------------------------
+
+
+def add_chat_message(project_id: str, author: str, body: str) -> str:
+    """Append a chat message. Returns sort key (CHAT#...)."""
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    sk = "CHAT#%s" % now
+    table.put_item(
+        Item={
+            "pk": _pk(project_id),
+            "sk": sk,
+            "author": (author or "").strip() or "unknown",
+            "body": body or "",
+            "created_at": now,
+        }
+    )
+    return sk
+
+
+def post_system_message(project_id: str, body: str) -> None:
+    """Post a system line to the project chat (no reply_pending)."""
+    add_chat_message(project_id, "system", body)
+
+
+def list_chat_messages(project_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Recent chat messages, oldest first (up to *limit* newest)."""
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    resp = table.query(
+        KeyConditionExpression=Key("pk").eq(_pk(project_id)) & Key("sk").begins_with("CHAT#"),
+        ScanIndexForward=False,
+        Limit=limit,
+    )
+    items = list(reversed(resp.get("Items", [])))
+    return items
+
+
+def set_project_reply_pending(project_id: str, pending: bool) -> None:
+    """Set PM reply_pending on the PROJECT item."""
+    update_project(project_id, {"reply_pending": pending})
+
+
+def claim_project_pm_reply(project_id: str) -> bool:
+    """Atomically clear reply_pending if it was true. Returns False if already claimed or not set."""
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        table.update_item(
+            Key={"pk": _pk(project_id), "sk": "PROJECT"},
+            UpdateExpression="SET reply_pending = :f, updated_at = :u, project_updated = :pu",
+            ConditionExpression="reply_pending = :t",
+            ExpressionAttributeValues={
+                ":f": False,
+                ":t": True,
+                ":u": now,
+                ":pu": now,
+            },
+        )
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            return False
+        raise
+    return True
+
+
+def list_project_reply_pending() -> List[str]:
+    """Return project_ids that need a PM reply (scan; low volume)."""
+    ddb = boto3.resource("dynamodb", region_name=AWS_REGION)
+    table = ddb.Table(TABLE_NAME)
+    out = []  # type: List[str]
+    start_key = None  # type: Optional[Dict[str, Any]]
+    while True:
+        kwargs = {
+            "FilterExpression": Attr("sk").eq("PROJECT") & Attr("reply_pending").eq(True),
+            "ProjectionExpression": "project_id",
+        }
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        resp = table.scan(**kwargs)
+        for it in resp.get("Items", []):
+            pid = it.get("project_id")
+            if pid:
+                out.append(str(pid))
+        start_key = resp.get("LastEvaluatedKey")
+        if not start_key:
+            break
+    return out

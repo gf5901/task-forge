@@ -45,9 +45,19 @@ import {
   startAutopilotCycle,
   stopAutopilotCycle,
   reviewAutopilotCycle,
+  fetchProjectChat,
+  postProjectChat,
 } from "@/lib/api"
 import type { Snapshot } from "@/lib/api"
-import type { Project, Directive, Task, TaskStatus, KPI, DailyPlan } from "@/lib/types"
+import type {
+  Project,
+  Directive,
+  Task,
+  TaskStatus,
+  KPI,
+  DailyPlan,
+  ProjectChatMessage,
+} from "@/lib/types"
 import { timeAgo } from "@/lib/time"
 
 const STATUS_BADGE: Record<string, string> = {
@@ -197,6 +207,9 @@ export default function ProjectDetail() {
   const [cycleHoursDraft, setCycleHoursDraft] = useState("24")
   const [reviewFeedback, setReviewFeedback] = useState("")
   const [cycleActionLoading, setCycleActionLoading] = useState(false)
+  const [pmChatMessages, setPmChatMessages] = useState<ProjectChatMessage[]>([])
+  const [pmChatBody, setPmChatBody] = useState("")
+  const [pmChatSending, setPmChatSending] = useState(false)
   /** When true, polling must not overwrite the spec textarea (draft). */
   const specEditingRef = useRef(false)
   useEffect(() => {
@@ -209,9 +222,14 @@ export default function ProjectDetail() {
     return Promise.all([
       fetchProjectDetail(projectId),
       fetchSnapshots(projectId),
+      fetchProjectChat(projectId).catch(() => ({
+        messages: [] as ProjectChatMessage[],
+        reply_pending: false,
+      })),
     ])
-      .then(async ([d, s]) => {
+      .then(async ([d, s, chat]) => {
         setProject(d.project)
+        setPmChatMessages(chat.messages)
         setDirectives(d.directives)
         setTasks(d.tasks)
         setProgress(d.progress)
@@ -277,7 +295,8 @@ export default function ProjectDetail() {
     tasks.some((t) => t.status === "pending" || t.status === "in_progress") ||
     (project && !project.awaiting_next_directive && project.active_directive_sk) ||
     (todayPlan?.status === "approved" &&
-      planTasks.some((t) => t.status === "pending" || t.status === "in_progress"))
+      planTasks.some((t) => t.status === "pending" || t.status === "in_progress")) ||
+    Boolean(project?.reply_pending)
 
   const humanTasksOpen = useMemo(
     () =>
@@ -437,6 +456,110 @@ export default function ProjectDetail() {
           />
         </div>
       </div>
+
+      {/* Project manager chat */}
+      <section className="mb-8">
+        <h2 className="mb-3 text-[13px] font-medium uppercase tracking-wide text-zinc-500">
+          Project manager
+        </h2>
+        <p className="mb-3 text-[12px] text-zinc-500">
+          Chat with the PM agent for status and context. It can use project data and create tasks when
+          needed.
+        </p>
+        {pmChatMessages.length === 0 && (
+          <p className="mb-3 text-[13px] text-zinc-600">No messages yet — say hello below.</p>
+        )}
+        <div className="mb-3 space-y-3">
+          {pmChatMessages.map((c, i) => {
+            const isPm = c.author === "pm-agent"
+            const isSystem = c.author === "system"
+            return (
+              <div key={`${c.created_at}-${i}`} className="flex gap-3">
+                <div
+                  className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full ${
+                    isPm
+                      ? "bg-indigo-500/20 text-indigo-400"
+                      : isSystem
+                        ? "bg-zinc-600/30 text-zinc-500"
+                        : "bg-zinc-700/50 text-zinc-400"
+                  }`}
+                >
+                  {isPm ? (
+                    <Bot className="size-3.5" />
+                  ) : isSystem ? (
+                    <span className="text-[9px] font-bold">SYS</span>
+                  ) : (
+                    <User className="size-3.5" />
+                  )}
+                </div>
+                <div
+                  className={`min-w-0 flex-1 space-y-1 rounded-lg border px-3 py-2.5 ${
+                    isSystem
+                      ? "border-zinc-800/30 bg-zinc-950/40 italic text-zinc-500"
+                      : "border-zinc-800/40 bg-zinc-900/30"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+                    <span
+                      className={`font-medium ${
+                        isPm ? "text-indigo-400" : isSystem ? "text-zinc-500" : "text-zinc-400"
+                      }`}
+                    >
+                      {isPm ? "PM" : isSystem ? "System" : c.author}
+                    </span>
+                    <span>·</span>
+                    <span>{timeAgo(c.created_at)}</span>
+                  </div>
+                  <div className={`text-[13px] ${isSystem ? "text-zinc-500" : "text-zinc-300"}`}>
+                    <Markdown>{c.body}</Markdown>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        {project.reply_pending && (
+          <div className="mb-3 flex items-center gap-2 rounded-lg border border-indigo-500/20 bg-indigo-500/5 px-3 py-2.5">
+            <Loader className="size-3.5 shrink-0 animate-spin text-indigo-400" />
+            <span className="text-[13px] text-indigo-400">PM is preparing a reply…</span>
+          </div>
+        )}
+        <form
+          className="flex gap-2"
+          onSubmit={async (e) => {
+            e.preventDefault()
+            if (!projectId || !pmChatBody.trim()) return
+            setPmChatSending(true)
+            try {
+              const r = await postProjectChat(projectId, pmChatBody.trim())
+              setPmChatMessages((prev) => [...prev, r.message])
+              setProject((p) => (p ? { ...p, reply_pending: r.reply_pending } : p))
+              setPmChatBody("")
+              toast.success("Message sent")
+              await load()
+            } catch (err) {
+              toast.error(err instanceof Error ? err.message : "Failed to send")
+            } finally {
+              setPmChatSending(false)
+            }
+          }}
+        >
+          <Textarea
+            placeholder="Ask for a status update or share context…"
+            value={pmChatBody}
+            onChange={(e) => setPmChatBody(e.target.value)}
+            className="h-10 min-h-10 resize-none border-zinc-700/60 bg-zinc-900/40 py-2 transition-all focus:h-24"
+          />
+          <Button
+            type="submit"
+            size="sm"
+            disabled={pmChatSending || !pmChatBody.trim()}
+            className="h-10 shrink-0 px-3"
+          >
+            <Send className="size-3.5" />
+          </Button>
+        </form>
+      </section>
 
       {/* KPI Dashboard */}
       <section className="mb-8">
