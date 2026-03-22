@@ -166,6 +166,7 @@ Project metadata. `id` is 8-char hex.
 | cycle_pause_reason | string? | `time_expired` · `blocked` · `failures` · `manual` |
 | cycle_feedback | string? | Human notes for next planner pass |
 | next_check_at | string? | Agent-requested deferral (ISO); empty if none |
+| reply_pending | bool? | When true, EC2 poller runs `run_task.py --pm-reply` for project-level PM chat |
 
 **GSI:** project-list-index (`proj_status`, `project_updated`).
 
@@ -187,6 +188,20 @@ Human-authored daily directives.
 | task_ids | list\<string\> | Task IDs created from decomposition |
 
 **Access:** `Query pk, sk begins_with "DIR#"` — `ScanIndexForward=true`.
+
+---
+
+### Project CHAT — `pk=PROJECT#{id}  sk=CHAT#{iso}`
+
+Project-level PM / system chat thread (human, `pm-agent`, or `system`).
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| author | string | `web` / human label · `pm-agent` · `system` |
+| body | string | Markdown message |
+| created_at | string | ISO 8601 (matches sk suffix) |
+
+**Access:** `Query pk, sk begins_with "CHAT#"` — `ScanIndexForward=false, Limit=N` then reverse for chronological order.
 
 ---
 

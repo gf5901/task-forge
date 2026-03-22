@@ -87,6 +87,15 @@ export interface Project {
   cycle_feedback: string;
   /** Agent-requested “check back after” time (ISO); empty if none */
   next_check_at: string;
+  /** PM chat: EC2 poller should run run_task.py --pm-reply */
+  reply_pending: boolean;
+}
+
+/** Project-level PM / system chat thread */
+export interface ProjectChatMessage {
+  author: string;
+  body: string;
+  created_at: string;
 }
 
 export type PlanStatus = "proposed" | "approved" | "executing" | "completed";

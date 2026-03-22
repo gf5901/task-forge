@@ -16,6 +16,7 @@ from .projects_dynamo import (
     get_project,
     list_memories,
     list_proposals,
+    post_system_message,
     put_proposal,
     update_proposal_status,
     update_snapshot_reflection,
@@ -495,6 +496,22 @@ def run_daily_cycle(store: Any, project_id: str) -> bool:
                 "target_kpi": kpi_id,
             },
         )
+
+    try:
+        if proposals or human_tasks or kpi_suggestions:
+            bits = []  # type: List[str]
+            if proposals:
+                bits.append("%d proposal(s)" % len(proposals))
+            if human_tasks:
+                bits.append("%d human task(s)" % len(human_tasks))
+            if kpi_suggestions:
+                bits.append("%d KPI suggestion(s)" % len(kpi_suggestions))
+            post_system_message(
+                project_id,
+                "Daily metrics cycle: " + ", ".join(bits) + ".",
+            )
+    except Exception:
+        log.debug("pm chat daily cycle notify failed", exc_info=True)
 
     plog(
         project_id,

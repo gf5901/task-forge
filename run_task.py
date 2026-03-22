@@ -8,6 +8,7 @@ Usage:
     python run_task.py --directive <project_id> <directive_sk>  # decompose directive into tasks
     python run_task.py --daily-cycle <project_id>  # run daily observe/reflect/propose cycle
     python run_task.py --propose-plan <project_id>  # autopilot plan [--regenerate] [--plan-suffix ID]
+    python run_task.py --pm-reply <project_id>  # project PM chat reply
 """
 
 import os
@@ -112,6 +113,14 @@ if __name__ == "__main__":
         _configure_logging()
         store = _make_store()
         run_comment_reply(store, sys.argv[2])
+    elif len(sys.argv) >= 3 and sys.argv[1] == "--pm-reply":
+        from src.logging_config import configure as _configure_logging
+        from src.pm_agent import run_pm_reply
+
+        _configure_logging()
+        store = _make_store()
+        ok = run_pm_reply(store, sys.argv[2])
+        raise SystemExit(0 if ok else 1)
     else:
         from src.runner import main
 

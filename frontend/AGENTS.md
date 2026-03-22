@@ -28,9 +28,9 @@ src/
   pages/Stats.tsx         — Usage & cost (today / all-time tokens, budget bar, 14-day chart via GET /api/stats and /api/budget)
   pages/ProjectList.tsx   — Project list with status, task progress, last directive, target repo
   pages/ProjectCreate.tsx — New project form: title, spec (markdown) with optional “Generate from prompt” (Bedrock via API), priority, target repo, autopilot toggle
-  pages/ProjectDetail.tsx — Spec editor (Generate while editing), progress bar, autopilot Off/Daily/Continuous + plan timeline (continuous), cycle start/stop/review, daily plan approve/regenerate, directive timeline, active tasks; polls 3s while busy
+  pages/ProjectDetail.tsx — Spec editor (Generate while editing), progress bar, **Project manager** chat (GET/POST `/projects/:id/chat`, polls while `reply_pending`), autopilot Off/Daily/Continuous + plan timeline (continuous), cycle start/stop/review, daily plan approve/regenerate, directive timeline, active tasks; polls 3s while busy
   pages/Login.tsx         — Sign-in page
-  lib/api.ts              — Fetch client; project CRUD; plan APIs (fetchPlans, fetchPlanDetail, approvePlan, regeneratePlan, patchPlanItems); continuous autopilot cycle (startAutopilotCycle, stopAutopilotCycle, reviewAutopilotCycle)
+  lib/api.ts              — Fetch client; project CRUD; `fetchProjectChat` / `postProjectChat`; plan APIs (fetchPlans, fetchPlanDetail, approvePlan, regeneratePlan, patchPlanItems); continuous autopilot cycle (startAutopilotCycle, stopAutopilotCycle, reviewAutopilotCycle)
   lib/types.ts            — TypeScript interfaces matching the /api/* responses; Task includes role: string, project_id, directive_sk; Project (with autopilot boolean), Directive, DailyPlan, PlanItem, ProjectListItem types
   lib/time.ts             — timeAgo utility
   index.css               — Tailwind imports, dark theme CSS vars, .prose-custom styles (colors use CSS var tokens, not hardcoded oklch literals)

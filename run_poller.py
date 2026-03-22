@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Polling daemon that picks up pending tasks and comment replies from DynamoDB.
+"""Polling daemon that picks up pending tasks, task comment replies, and project PM chat from DynamoDB.
 
 Replaces SSM-based triggering from the Lambda API. Runs as a systemd service
 on EC2 and spawns run_task.py subprocesses — existing slot locking handles
@@ -13,7 +13,6 @@ import logging
 import os
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -151,6 +150,16 @@ def main():
             for t in reply_tasks:
                 _spawn(["--reply", t.id])
                 log.info("Spawned reply runner for task %s", t.id)
+
+            try:
+                from src.projects_dynamo import list_project_reply_pending
+            except ImportError:
+                list_project_reply_pending = None  # type: ignore[assignment]
+
+            if list_project_reply_pending is not None:
+                for pid in list_project_reply_pending():
+                    _spawn(["--pm-reply", pid])
+                    log.info("Spawned PM reply runner for project %s", pid)
 
         except Exception:
             log.exception("Poller iteration failed")

@@ -10,6 +10,7 @@ import type {
   KPI,
   DailyPlan,
   PlanItem,
+  ProjectChatMessage,
 } from "./types"
 
 const BASE = (import.meta.env.VITE_API_BASE_URL ?? "") + "/api"
@@ -236,6 +237,22 @@ export async function fetchProjectDetail(id: string) {
     tasks: Task[]
     progress: { total: number; done: number }
   }>(`/projects/${id}`)
+}
+
+export async function fetchProjectChat(projectId: string, limit = 50) {
+  return request<{ messages: ProjectChatMessage[]; reply_pending: boolean }>(
+    `/projects/${projectId}/chat?limit=${limit}`
+  )
+}
+
+export async function postProjectChat(projectId: string, body: string) {
+  return request<{ message: ProjectChatMessage; reply_pending: boolean }>(
+    `/projects/${projectId}/chat`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    }
+  )
 }
 
 export async function createProject(data: {

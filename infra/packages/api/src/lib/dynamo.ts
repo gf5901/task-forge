@@ -26,6 +26,7 @@ import type {
   DailyPlan,
   PlanItem,
   PlanStatus,
+  ProjectChatMessage,
 } from "./types.js";
 
 const TABLE_NAME = process.env.DYNAMO_TABLE ?? "agent-tasks";
@@ -689,6 +690,7 @@ function itemToProject(item: Record<string, unknown>): Project {
     cycle_pause_reason: (item.cycle_pause_reason as Project["cycle_pause_reason"]) ?? "",
     cycle_feedback: (item.cycle_feedback as string) ?? "",
     next_check_at: (item.next_check_at as string) ?? "",
+    reply_pending: Boolean(item.reply_pending),
   };
 }
 
@@ -743,6 +745,7 @@ export async function createProject(params: {
     cycle_pause_reason: "",
     cycle_feedback: "",
     next_check_at: "",
+    reply_pending: false,
   };
   if (params.target_repo?.trim()) item.target_repo = params.target_repo.trim();
   await ddb.send(new PutCommand({ TableName: TABLE_NAME, Item: item }));
@@ -809,6 +812,7 @@ export async function updateProject(
     cycle_pause_reason: Project["cycle_pause_reason"];
     cycle_feedback: string;
     next_check_at: string;
+    reply_pending: boolean;
   }>
 ): Promise<Project | null> {
   const p = await getProject(projectId);
@@ -910,6 +914,11 @@ export async function updateProject(
     vals[":nc"] = updates.next_check_at;
     sets.push("#nc = :nc");
   }
+  if (updates.reply_pending !== undefined) {
+    names["#rp"] = "reply_pending";
+    vals[":rp"] = updates.reply_pending;
+    sets.push("#rp = :rp");
+  }
   let updateExpr = `SET ${sets.join(", ")}`;
   if (removes.length) updateExpr += ` REMOVE ${removes.join(", ")}`;
   const resp = await ddb.send(
@@ -923,6 +932,77 @@ export async function updateProject(
     })
   );
   return resp.Attributes ? itemToProject(resp.Attributes) : null;
+}
+
+function itemToProjectChatMessage(
+  item: Record<string, unknown>
+): ProjectChatMessage {
+  return {
+    author: (item.author as string) ?? "",
+    body: (item.body as string) ?? "",
+    created_at: (item.created_at as string) ?? "",
+  };
+}
+
+/** Recent project chat messages (oldest first), plus PM reply flag from PROJECT item. */
+export async function getProjectChat(
+  projectId: string,
+  limit = 50
+): Promise<{ messages: ProjectChatMessage[]; reply_pending: boolean } | null> {
+  const p = await getProject(projectId);
+  if (!p) return null;
+  const resp = await ddb.send(
+    new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: {
+        ":pk": projectPk(projectId),
+        ":prefix": "CHAT#",
+      },
+      ScanIndexForward: false,
+      Limit: limit,
+    })
+  );
+  const items = [...(resp.Items ?? [])].reverse();
+  return {
+    messages: items.map(itemToProjectChatMessage),
+    reply_pending: p.reply_pending,
+  };
+}
+
+export async function addProjectChatMessage(
+  projectId: string,
+  author: string,
+  body: string,
+  requestPmReply: boolean
+): Promise<{ message: ProjectChatMessage; reply_pending: boolean } | null> {
+  const p = await getProject(projectId);
+  if (!p) return null;
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  const auth = (author || "web").trim() || "web";
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "+00:00");
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        pk: projectPk(projectId),
+        sk: `CHAT#${now}`,
+        author: auth,
+        body: trimmed,
+        created_at: now,
+      },
+    })
+  );
+  let replyPending = p.reply_pending;
+  if (requestPmReply) {
+    const updated = await updateProject(projectId, { reply_pending: true });
+    replyPending = updated?.reply_pending ?? true;
+  }
+  return {
+    message: { author: auth, body: trimmed, created_at: now },
+    reply_pending: replyPending,
+  };
 }
 
 export async function deleteProject(projectId: string): Promise<boolean> {

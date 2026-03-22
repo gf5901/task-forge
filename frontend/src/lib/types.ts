@@ -89,6 +89,14 @@ export interface Project {
   cycle_pause_reason?: CyclePauseReason
   cycle_feedback?: string
   next_check_at?: string
+  /** PM project chat: agent reply in flight */
+  reply_pending?: boolean
+}
+
+export interface ProjectChatMessage {
+  author: string
+  body: string
+  created_at: string
 }
 
 export interface ProjectListItem extends Project {
