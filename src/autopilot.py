@@ -524,14 +524,7 @@ def propose_daily_plan(
             plog(project_id, "autopilot_plan_skip", "autopilot", "Batch in flight")
             return True
         if _fully_blocked_on_human(all_project_tasks) and not regenerate:
-            title = str(proj.get("title", "Project"))
-            _pause_cycle(
-                project_id,
-                proj,
-                "blocked",
-                "**%s** — all remaining work is on human-assigned tasks. Complete or unblock them to continue."
-                % title,
-            )
+            log.info("autopilot: all non-terminal tasks are human-assigned — skip tick")
             plog(project_id, "autopilot_plan_skip", "autopilot", "Blocked on human tasks")
             return True
     else:
