@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react"
-import { useParams, Link } from "react-router-dom"
+import { useParams, Link, useSearchParams } from "react-router-dom"
 import toast from "react-hot-toast"
 import {
   ArrowLeft,
@@ -15,6 +15,9 @@ import {
   AlertTriangle,
   Sparkles,
   RotateCcw,
+  FileText,
+  Plus,
+  Trash2,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -48,6 +51,9 @@ import {
   fetchProjectChat,
   postProjectChat,
   dismissProjectDirective,
+  fetchProjectDocs,
+  putProjectDoc,
+  deleteProjectDoc,
 } from "@/lib/api"
 import type { Snapshot } from "@/lib/api"
 import type {
@@ -58,6 +64,7 @@ import type {
   KPI,
   DailyPlan,
   ProjectChatMessage,
+  ProjectDoc,
 } from "@/lib/types"
 import { timeAgo } from "@/lib/time"
 
@@ -179,8 +186,27 @@ function EditableTitle({
   )
 }
 
+const PROJECT_TABS = ["overview", "autopilot", "spec", "docs", "directives"] as const
+type ProjectTab = (typeof PROJECT_TABS)[number]
+
+const TAB_LABELS: Record<ProjectTab, string> = {
+  overview: "Overview",
+  autopilot: "Autopilot",
+  spec: "Spec",
+  docs: "Docs",
+  directives: "Directives",
+}
+
 export default function ProjectDetail() {
   const { projectId } = useParams<{ projectId: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const rawTab = searchParams.get("tab") ?? "overview"
+  const activeTab: ProjectTab = PROJECT_TABS.includes(rawTab as ProjectTab)
+    ? (rawTab as ProjectTab)
+    : "overview"
+  const setActiveTab = (tab: ProjectTab) =>
+    setSearchParams({ tab }, { replace: true })
+
   const [project, setProject] = useState<Project | null>(null)
   const [directives, setDirectives] = useState<Directive[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
@@ -211,6 +237,13 @@ export default function ProjectDetail() {
   const [pmChatMessages, setPmChatMessages] = useState<ProjectChatMessage[]>([])
   const [pmChatBody, setPmChatBody] = useState("")
   const [pmChatSending, setPmChatSending] = useState(false)
+  const [projectDocs, setProjectDocs] = useState<ProjectDoc[]>([])
+  const [docEditing, setDocEditing] = useState<string | null>(null)
+  const [docDraftTitle, setDocDraftTitle] = useState("")
+  const [docDraftContent, setDocDraftContent] = useState("")
+  const [docDraftSlug, setDocDraftSlug] = useState("")
+  const [docSaving, setDocSaving] = useState(false)
+  const [docCreating, setDocCreating] = useState(false)
   /** When true, polling must not overwrite the spec textarea (draft). */
   const specEditingRef = useRef(false)
   useEffect(() => {
@@ -227,10 +260,12 @@ export default function ProjectDetail() {
         messages: [] as ProjectChatMessage[],
         reply_pending: false,
       })),
+      fetchProjectDocs(projectId).catch(() => ({ docs: [] as ProjectDoc[] })),
     ])
-      .then(async ([d, s, chat]) => {
+      .then(async ([d, s, chat, docsResult]) => {
         setProject(d.project)
         setPmChatMessages(chat.messages)
+        setProjectDocs(docsResult.docs)
         setDirectives(d.directives)
         setTasks(d.tasks)
         setProgress(d.progress)
@@ -440,6 +475,27 @@ export default function ProjectDetail() {
         </Badge>
       </div>
 
+      {/* Tab bar */}
+      <nav className="mb-8 flex gap-1 rounded-lg border border-zinc-800/60 bg-zinc-900/30 p-1">
+        {PROJECT_TABS.map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            className={`flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
+              activeTab === tab
+                ? "bg-indigo-600 text-white"
+                : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50"
+            }`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {TAB_LABELS[tab]}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── Overview tab ── */}
+      {activeTab === "overview" && (
+        <>
       {/* Progress */}
       <div className="mb-8 rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-4 py-3">
         <div className="mb-2 flex justify-between text-[13px] text-zinc-400">
@@ -562,6 +618,65 @@ export default function ProjectDetail() {
         </form>
       </section>
 
+      {/* Your tasks (human-assigned) */}
+      {humanTasks.length > 0 && (
+        <section className="mb-10">
+          <h2 className="mb-3 flex items-center gap-2 text-[13px] font-medium uppercase tracking-wide text-orange-400">
+            <User className="size-4" />
+            Your tasks ({humanTasks.length})
+          </h2>
+          <ul className="space-y-2">
+            {humanTasks.map((t) => (
+              <li key={t.id}>
+                <Link
+                  to={`/tasks/${t.id}`}
+                  className="flex items-center justify-between gap-3 rounded-md border border-orange-500/20 bg-orange-500/5 px-3 py-2 text-[13px] hover:bg-orange-500/10"
+                >
+                  <span className="truncate text-zinc-200">{t.title}</span>
+                  <Badge variant="outline" className={`text-[10px] ${STATUS_BADGE[t.status]}`}>
+                    {t.status.replace("_", " ")}
+                  </Badge>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {/* Active tasks */}
+      <section className="mb-10">
+        <h2 className="mb-3 text-[13px] font-medium uppercase tracking-wide text-zinc-500">
+          Active tasks
+        </h2>
+        {activeTasks.length === 0 ? (
+          <p className="text-sm text-zinc-500">No active tasks for this project.</p>
+        ) : (
+          <ul className="space-y-2">
+            {activeTasks.map((t) => (
+              <li key={t.id}>
+                <Link
+                  to={`/tasks/${t.id}`}
+                  className="flex items-center justify-between gap-3 rounded-md border border-zinc-800/50 bg-zinc-900/20 px-3 py-2 text-[13px] hover:bg-zinc-800/30"
+                >
+                  <span className="truncate text-zinc-200">{t.title}</span>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    <TaskStatusIcon status={t.status} />
+                    <Badge variant="outline" className={`text-[10px] ${STATUS_BADGE[t.status]}`}>
+                      {t.status.replace("_", " ")}
+                    </Badge>
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+        </>
+      )}
+
+      {/* ── Autopilot tab ── */}
+      {activeTab === "autopilot" && (
+        <>
       {/* KPI Dashboard */}
       <section className="mb-8">
         <div className="mb-3 flex items-center justify-between">
@@ -1067,7 +1182,12 @@ export default function ProjectDetail() {
           </div>
         )}
       </section>
+        </>
+      )}
 
+      {/* ── Spec tab ── */}
+      {activeTab === "spec" && (
+        <>
       {/* Spec */}
       <section className="mb-10">
         <div className="mb-2 flex items-center justify-between">
@@ -1163,7 +1283,237 @@ export default function ProjectDetail() {
           </div>
         )}
       </section>
+        </>
+      )}
 
+      {/* ── Docs tab ── */}
+      {activeTab === "docs" && (
+        <section className="mb-10">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-[13px] font-medium uppercase tracking-wide text-zinc-500">
+              <FileText className="mr-1.5 inline size-4" />
+              Project docs
+            </h2>
+            {!docCreating && !docEditing && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-[12px] border-zinc-700 text-zinc-300"
+                onClick={() => {
+                  setDocCreating(true)
+                  setDocEditing(null)
+                  setDocDraftSlug("")
+                  setDocDraftTitle("")
+                  setDocDraftContent("")
+                }}
+              >
+                <Plus className="size-3.5" />
+                New doc
+              </Button>
+            )}
+          </div>
+          <p className="mb-4 text-[12px] text-zinc-500">
+            Non-repo knowledge: credentials inventory, infra references, business context. Agents access these via <code className="text-zinc-400">./ctx docs</code>.
+          </p>
+
+          {/* Create new doc form */}
+          {docCreating && (
+            <div className="mb-6 space-y-3 rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-4 py-3">
+              <p className="text-[12px] font-medium text-zinc-400">New document</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Slug</label>
+                  <Input
+                    value={docDraftSlug}
+                    onChange={(e) => setDocDraftSlug(
+                      e.target.value
+                        .toLowerCase()
+                        .replace(/[^a-z0-9_-]/g, "")
+                        .replace(/^[^a-z0-9]+/, "")
+                        .slice(0, 63)
+                    )}
+                    placeholder="e.g. aws-setup"
+                    maxLength={63}
+                    className="h-8 border-zinc-800 bg-zinc-950/50 text-[12px] font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-zinc-500">Title</label>
+                  <Input
+                    value={docDraftTitle}
+                    onChange={(e) => setDocDraftTitle(e.target.value)}
+                    placeholder="AWS Setup Notes"
+                    className="h-8 border-zinc-800 bg-zinc-950/50 text-[12px]"
+                  />
+                </div>
+              </div>
+              <Textarea
+                value={docDraftContent}
+                onChange={(e) => setDocDraftContent(e.target.value)}
+                placeholder="Document content (markdown)…"
+                rows={8}
+                className="resize-y border-zinc-800 bg-zinc-950/50 font-mono text-[13px]"
+              />
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  disabled={docSaving || !docDraftSlug.trim() || !docDraftTitle.trim()}
+                  onClick={async () => {
+                    if (!projectId) return
+                    setDocSaving(true)
+                    try {
+                      await putProjectDoc(projectId, docDraftSlug.trim(), {
+                        title: docDraftTitle.trim(),
+                        content: docDraftContent,
+                      })
+                      setDocCreating(false)
+                      setDocDraftSlug("")
+                      setDocDraftTitle("")
+                      setDocDraftContent("")
+                      toast.success("Doc created")
+                      await load()
+                    } catch (e) {
+                      toast.error(e instanceof Error ? e.message : "Failed to save")
+                    } finally {
+                      setDocSaving(false)
+                    }
+                  }}
+                >
+                  {docSaving ? <Loader className="size-3.5 animate-spin" /> : "Create"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDocCreating(false)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Doc list */}
+          {projectDocs.length === 0 && !docCreating ? (
+            <p className="text-[13px] text-zinc-500">No docs yet. Add one to store non-repo knowledge for agents.</p>
+          ) : (
+            <div className="space-y-3">
+              {projectDocs.map((doc) => {
+                const isEditing = docEditing === doc.slug
+                return (
+                  <div
+                    key={doc.slug}
+                    className="rounded-lg border border-zinc-800/60 bg-zinc-900/30 px-4 py-3"
+                  >
+                    {isEditing ? (
+                      <div className="space-y-3">
+                        <Input
+                          value={docDraftTitle}
+                          onChange={(e) => setDocDraftTitle(e.target.value)}
+                          className="h-8 border-zinc-800 bg-zinc-950/50 text-[13px] font-medium"
+                        />
+                        <Textarea
+                          value={docDraftContent}
+                          onChange={(e) => setDocDraftContent(e.target.value)}
+                          rows={10}
+                          className="resize-y border-zinc-800 bg-zinc-950/50 font-mono text-[13px]"
+                        />
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            disabled={docSaving || !docDraftTitle.trim()}
+                            onClick={async () => {
+                              if (!projectId) return
+                              setDocSaving(true)
+                              try {
+                                await putProjectDoc(projectId, doc.slug, {
+                                  title: docDraftTitle.trim(),
+                                  content: docDraftContent,
+                                })
+                                setDocEditing(null)
+                                toast.success("Doc updated")
+                                await load()
+                              } catch (e) {
+                                toast.error(e instanceof Error ? e.message : "Save failed")
+                              } finally {
+                                setDocSaving(false)
+                              }
+                            }}
+                          >
+                            {docSaving ? <Loader className="size-3.5 animate-spin" /> : "Save"}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setDocEditing(null)}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="mb-2 flex items-center justify-between">
+                          <div className="min-w-0">
+                            <span className="text-[13px] font-medium text-zinc-200">
+                              {doc.title}
+                            </span>
+                            <span className="ml-2 font-mono text-[11px] text-zinc-600">
+                              {doc.slug}
+                            </span>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => {
+                                setDocEditing(doc.slug)
+                                setDocCreating(false)
+                                setDocDraftTitle(doc.title)
+                                setDocDraftContent(doc.content)
+                              }}
+                            >
+                              <Pencil className="size-3" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-[11px] text-red-400 hover:text-red-300"
+                              onClick={async () => {
+                                if (!projectId) return
+                                if (!window.confirm(`Delete "${doc.title}"?`)) return
+                                try {
+                                  await deleteProjectDoc(projectId, doc.slug)
+                                  toast.success("Doc deleted")
+                                  await load()
+                                } catch (e) {
+                                  toast.error(e instanceof Error ? e.message : "Delete failed")
+                                }
+                              }}
+                            >
+                              <Trash2 className="size-3" />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="prose prose-invert prose-sm max-w-none text-[13px] text-zinc-400">
+                          <Markdown>{doc.content || "_Empty_"}</Markdown>
+                        </div>
+                        <p className="mt-2 text-[10px] text-zinc-600">
+                          Updated {timeAgo(doc.updated_at)}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ── Directives tab ── */}
+      {activeTab === "directives" && (
+        <>
       {/* Directive timeline */}
       <section className="mb-10">
         <div className="mb-4 flex items-center justify-between">
@@ -1286,60 +1636,8 @@ export default function ProjectDetail() {
           </ul>
         )}
       </section>
-
-      {/* Your tasks (human-assigned) */}
-      {humanTasks.length > 0 && (
-        <section className="mb-10">
-          <h2 className="mb-3 flex items-center gap-2 text-[13px] font-medium uppercase tracking-wide text-orange-400">
-            <User className="size-4" />
-            Your tasks ({humanTasks.length})
-          </h2>
-          <ul className="space-y-2">
-            {humanTasks.map((t) => (
-              <li key={t.id}>
-                <Link
-                  to={`/tasks/${t.id}`}
-                  className="flex items-center justify-between gap-3 rounded-md border border-orange-500/20 bg-orange-500/5 px-3 py-2 text-[13px] hover:bg-orange-500/10"
-                >
-                  <span className="truncate text-zinc-200">{t.title}</span>
-                  <Badge variant="outline" className={`text-[10px] ${STATUS_BADGE[t.status]}`}>
-                    {t.status.replace("_", " ")}
-                  </Badge>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </section>
+        </>
       )}
-
-      {/* Active tasks */}
-      <section className="mb-10">
-        <h2 className="mb-3 text-[13px] font-medium uppercase tracking-wide text-zinc-500">
-          Active tasks
-        </h2>
-        {activeTasks.length === 0 ? (
-          <p className="text-sm text-zinc-500">No active tasks for this project.</p>
-        ) : (
-          <ul className="space-y-2">
-            {activeTasks.map((t) => (
-              <li key={t.id}>
-                <Link
-                  to={`/tasks/${t.id}`}
-                  className="flex items-center justify-between gap-3 rounded-md border border-zinc-800/50 bg-zinc-900/20 px-3 py-2 text-[13px] hover:bg-zinc-800/30"
-                >
-                  <span className="truncate text-zinc-200">{t.title}</span>
-                  <span className="flex shrink-0 items-center gap-1.5">
-                    <TaskStatusIcon status={t.status} />
-                    <Badge variant="outline" className={`text-[10px] ${STATUS_BADGE[t.status]}`}>
-                      {t.status.replace("_", " ")}
-                    </Badge>
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
 
       {/* Directive modal */}
       <Dialog open={directiveOpen} onOpenChange={setDirectiveOpen}>

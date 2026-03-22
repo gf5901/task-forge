@@ -24,7 +24,7 @@ There is no bare `python` or `python3` in `$PATH` that has project dependencies.
 - `src/bot.py` — Discord bot with slash commands (discord.py)
 - `src/task_store.py` — Shared task types (`Task`, enums, `Comment`)
 - `src/dynamo_store.py` — DynamoDB-backed task store (`DynamoTaskStore`)
-- `src/projects_dynamo.py` — DynamoDB helpers for project records (get/update project, directives, snapshots, proposals, daily plans)
+- `src/projects_dynamo.py` — DynamoDB helpers for project records (get/update project, directives, snapshots, proposals, daily plans, docs)
 - `src/autopilot.py` — Daily autopilot plan proposal (`propose_daily_plan`); called via `run_task.py --propose-plan`
 - `src/pipeline.py` — Task orchestration: plan, execute, PR, cleanup; `run_directive()` for project directives
 - `src/objectives.py` — Daily autonomous cycle: observe metrics → reflect → propose actions; `run_daily_cycle()` for projects with KPIs
@@ -152,7 +152,7 @@ Projects are long-lived entities (`pk=PROJECT#<id>`, `sk=PROJECT`) with a title,
 - `project-list-index` (`proj_status`, `project_updated`) — list projects by status
 
 ### Hono project routes (`infra/packages/api/src/routes/projects.ts`)
-`GET /api/projects`, `GET /api/projects/:id`, `POST /api/projects`, `PATCH /api/projects/:id`, `DELETE /api/projects/:id`, `POST /api/projects/:id/directive`, `GET /api/projects/:id/snapshots`, `GET /api/projects/:id/proposals`, `PATCH /api/projects/:id/proposals/:propSk`, `GET /api/projects/:id/requests`, `PATCH /api/projects/:id/requests/:reqSk`, `GET /api/projects/:id/plans`, `GET /api/projects/:id/plans/:planId`, `PATCH /api/projects/:id/plans/:planId`, `POST /api/projects/:id/plans/:planId/approve`, `POST /api/projects/:id/plans/:planId/regenerate`, `POST /api/projects/:id/cycle/start`, `POST /api/projects/:id/cycle/stop`, `POST /api/projects/:id/cycle/review`
+`GET /api/projects`, `GET /api/projects/:id`, `POST /api/projects`, `PATCH /api/projects/:id`, `DELETE /api/projects/:id`, `POST /api/projects/:id/directive`, `GET /api/projects/:id/docs`, `GET /api/projects/:id/docs/:slug`, `PUT /api/projects/:id/docs/:slug`, `DELETE /api/projects/:id/docs/:slug`, `GET /api/projects/:id/snapshots`, `GET /api/projects/:id/proposals`, `PATCH /api/projects/:id/proposals/:propSk`, `GET /api/projects/:id/requests`, `PATCH /api/projects/:id/requests/:reqSk`, `GET /api/projects/:id/plans`, `GET /api/projects/:id/plans/:planId`, `PATCH /api/projects/:id/plans/:planId`, `POST /api/projects/:id/plans/:planId/approve`, `POST /api/projects/:id/plans/:planId/regenerate`, `POST /api/projects/:id/cycle/start`, `POST /api/projects/:id/cycle/stop`, `POST /api/projects/:id/cycle/review`
 
 ### Digest Lambda
 `infra/packages/digest/` — scheduled Lambda (cron `0 14 * * ? *`) posts a daily summary of task activity and project progress to Discord via webhook. Includes KPI briefings, reflections, and pending proposals for projects with KPIs.
@@ -168,7 +168,7 @@ Projects can define KPIs (`kpis` array on the PROJECT record). When KPIs are pre
 
 Proposals go through a human approval queue in the web UI. Approved proposals create tasks that flow through the existing pipeline. Rejected proposals carry feedback the agent sees in the next cycle. Proposal outcomes are tracked — when a task completes, the PROP record is updated so the agent can learn what worked.
 
-DynamoDB record types under `PROJECT#<id>`: `PROJECT`, `DIR#<iso>`, `SNAPSHOT#<date>`, `PROP#<date>#<id>`, `PLAN#<YYYY-MM-DD>`. Task records use `TASK#<id>` as pk with sk prefixes `META`, `OUTPUT#`, `COMMENT#`, `PLAN#`, `LOG#`. See `docs/dynamo-schema.md` for the full single-table schema (all record types, GSIs, attributes, access patterns).
+DynamoDB record types under `PROJECT#<id>`: `PROJECT`, `DIR#<iso>`, `SNAPSHOT#<date>`, `PROP#<date>#<id>`, `PLAN#<YYYY-MM-DD>`, `DOC#<slug>`. Task records use `TASK#<id>` as pk with sk prefixes `META`, `OUTPUT#`, `COMMENT#`, `PLAN#`, `LOG#`. See `docs/dynamo-schema.md` for the full single-table schema (all record types, GSIs, attributes, access patterns).
 
 See `docs/autonomous-objectives.md` for the full design vision and `docs/autonomous-objectives-setup.md` for human setup steps.
 
