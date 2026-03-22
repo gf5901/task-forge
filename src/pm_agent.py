@@ -5,7 +5,7 @@ import logging
 import os
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 from .agent import MODEL_FULL, SECURITY_PREFIX, _extract_agent_text, run_agent
 from .context_cli import write_ctx_script
@@ -172,10 +172,9 @@ def run_pm_reply(store: Any, project_id: str) -> bool:
         return False
 
     # Claim the chat reply_pending if set (atomic guard against concurrent runs).
-    if has_chat:
-        if not claim_project_pm_reply(project_id):
-            log.info("pm_reply: lost claim race for project %s", project_id)
-            has_chat = False
+    if has_chat and not claim_project_pm_reply(project_id):
+        log.info("pm_reply: lost claim race for project %s", project_id)
+        has_chat = False
 
     # Clear reply_pending on each human task we're about to process.
     claimed_tasks = []  # type: List[Any]
