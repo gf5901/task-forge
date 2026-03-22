@@ -322,6 +322,12 @@ export async function postProjectDirective(id: string, content: string) {
   })
 }
 
+export async function dismissProjectDirective(id: string) {
+  return request<{ ok: boolean }>(`/projects/${id}/directive/dismiss`, {
+    method: "POST",
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Snapshots, Proposals, Human Requests
 // ---------------------------------------------------------------------------

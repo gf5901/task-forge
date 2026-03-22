@@ -472,6 +472,19 @@ def run_plan_only(store, task):
     return True
 
 
+def _clear_directive_on_failure(project_id, directive_sk):
+    # type: (str, str) -> None
+    """Reset project directive flags so autopilot isn't permanently blocked by a failed decomposition."""
+    try:
+        from .projects_dynamo import update_project
+
+        update_project(project_id, {"awaiting_next_directive": True})
+        log.info("run_directive: cleared directive flags for project %s after failure", project_id)
+        plog(project_id, "directive_failed", "plan", "Decomposition failed for %s" % directive_sk)
+    except Exception:
+        log.exception("run_directive: failed to clear directive flags for project %s", project_id)
+
+
 def run_directive(store, project_id, directive_sk):
     # type: (Any, str, str) -> bool
     """Decompose a project directive into top-level tasks (plan-only style), then dispatch runners."""
@@ -483,10 +496,12 @@ def run_directive(store, project_id, directive_sk):
     proj = get_project(project_id)
     if not proj:
         log.error("run_directive: project %s not found", project_id)
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
     ditem = get_directive_item(project_id, directive_sk)
     if not ditem:
         log.error("run_directive: directive %s not found for project %s", directive_sk, project_id)
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
 
     spec = (proj.get("spec") or "").strip() or "(no spec)"
@@ -518,31 +533,37 @@ def run_directive(store, project_id, directive_sk):
             )
     except subprocess.TimeoutExpired:
         log.warning("run_directive: timed out for project %s", project_id)
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
     except Exception:
         log.exception("run_directive: agent error for project %s", project_id)
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
 
     if result.returncode != 0:
         log.warning(
             "run_directive: agent failed project %s (exit %d)", project_id, result.returncode
         )
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
 
     text = _extract_agent_text(result.stdout)
     json_match = re.search(r"\[.*\]", text, re.DOTALL)
     if not json_match:
         log.warning("run_directive: no JSON for project %s", project_id)
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
 
     try:
         steps = _json.loads(json_match.group())
     except _json.JSONDecodeError:
         log.exception("run_directive: JSON parse error for project %s", project_id)
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
 
     if not isinstance(steps, list) or not steps:
         log.warning("run_directive: empty plan for project %s", project_id)
+        _clear_directive_on_failure(project_id, directive_sk)
         return False
 
     spec_excerpt = spec if len(spec) <= 2000 else spec[:2000] + "… (truncated)"

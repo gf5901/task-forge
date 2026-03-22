@@ -47,6 +47,7 @@ import {
   reviewAutopilotCycle,
   fetchProjectChat,
   postProjectChat,
+  dismissProjectDirective,
 } from "@/lib/api"
 import type { Snapshot } from "@/lib/api"
 import type {
@@ -1180,6 +1181,40 @@ export default function ProjectDetail() {
             New directive
           </Button>
         </div>
+        {(() => {
+          const activeDir = directives.find((d) => d.sk === project.active_directive_sk)
+          const stuck =
+            project.active_directive_sk &&
+            !project.awaiting_next_directive &&
+            activeDir &&
+            activeDir.task_ids.length === 0
+          if (!stuck) return null
+          return (
+            <div className="mb-4 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-[13px] text-amber-300">
+              <AlertTriangle className="size-4 shrink-0 text-amber-400" />
+              <span className="flex-1">
+                Directive decomposition failed — no tasks were created. Autopilot is blocked.
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 shrink-0 gap-1.5 border-amber-500/30 text-[12px] text-amber-300 hover:bg-amber-500/10"
+                onClick={async () => {
+                  try {
+                    await dismissProjectDirective(project.id)
+                    toast.success("Directive dismissed — autopilot unblocked")
+                    await load()
+                  } catch {
+                    toast.error("Failed to dismiss directive")
+                  }
+                }}
+              >
+                <XCircle className="size-3.5" />
+                Dismiss
+              </Button>
+            </div>
+          )
+        })()}
         {directives.length === 0 ? (
           <p className="text-sm text-zinc-500">No directives yet.</p>
         ) : (
