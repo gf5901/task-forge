@@ -1,9 +1,10 @@
 """Tests for PR URL storage and model stamping in the pipeline."""
 
 import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from src.task_store import TaskStatus
+from tests.support import attach_pr_mocks, git_cmd_side_effect, mock_process
 
 
 class TestSetPrUrl:
@@ -31,28 +32,8 @@ class TestSetPrUrl:
         assert tmp_tasks.get_pr_url(task.id) == "https://github.com/user/repo/pull/42"
 
 
-def _make_run_cmd(return_map=None):
-    """Build a mock _run_cmd that returns different results based on the first arg."""
-    defaults = MagicMock(returncode=0, stdout="", stderr="")
-
-    def side_effect(cmd, cwd=None, timeout=None):
-        if return_map:
-            for key, val in return_map.items():
-                if key in cmd or (isinstance(cmd, list) and any(key in str(c) for c in cmd)):
-                    return val
-        return defaults
-
-    return side_effect
-
-
 class TestCommitAndCreatePr:
     """commit_and_create_pr stores pr_url on success, skips on no-changes."""
-
-    def _make_store(self, tmp_tasks):
-        store = tmp_tasks
-        store.set_pr_url = MagicMock()
-        store.append_section = MagicMock()
-        return store
 
     @patch("src.pr._verify_pr_diff", return_value=(True, "LGTM"))
     @patch("src.pr._wait_for_pr_ci", return_value=True)
@@ -64,46 +45,24 @@ class TestCommitAndCreatePr:
     ):
         from src.pr import commit_and_create_pr
 
-        store = self._make_store(tmp_tasks)
+        store = attach_pr_mocks(tmp_tasks)
         task = tmp_tasks.create(title="Test task", target_repo="task-forge")
 
-        status_result = MagicMock(returncode=0, stdout="M file.py", stderr="")
-        add_result = MagicMock(returncode=0, stdout="", stderr="")
-        commit_result = MagicMock(returncode=0, stdout="", stderr="")
-        branch_result = MagicMock(returncode=0, stdout="task/abc-test", stderr="")
-        push_result = MagicMock(returncode=0, stdout="", stderr="")
-        pr_result = MagicMock(
-            returncode=0,
+        pr_result = mock_process(
             stdout="https://github.com/user/repo/pull/99\n",
-            stderr="",
         )
-        default_branch = MagicMock(returncode=0, stdout="main", stderr="")
-        blocked_result = MagicMock(returncode=0, stdout="", stderr="")
-
-        def side_effect(cmd, cwd=None, timeout=None):
-            if isinstance(cmd, list):
-                joined = " ".join(str(c) for c in cmd)
-                if "status --porcelain" in joined:
-                    return status_result
-                if "add -A" in joined:
-                    return add_result
-                if "diff --cached --name-only" in joined:
-                    return blocked_result
-                if "commit -m" in joined:
-                    return commit_result
-                if "rev-parse --abbrev-ref HEAD" in joined:
-                    return branch_result
-                if "push -u" in joined:
-                    return push_result
-                if "pr create" in joined:
-                    return pr_result
-                if "rev-parse --show-toplevel" in joined:
-                    return MagicMock(returncode=0, stdout="/tmp/repo", stderr="")
-                if "symbolic-ref" in joined:
-                    return default_branch
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        mock_cmd.side_effect = side_effect
+        rules = [
+            ("status --porcelain", mock_process(stdout="M file.py")),
+            ("add -A", mock_process()),
+            ("diff --cached --name-only", mock_process()),
+            ("commit -m", mock_process()),
+            ("rev-parse --abbrev-ref HEAD", mock_process(stdout="task/abc-test")),
+            ("push -u", mock_process()),
+            ("pr create", pr_result),
+            ("rev-parse --show-toplevel", mock_process(stdout="/tmp/repo")),
+            ("symbolic-ref", mock_process(stdout="main")),
+        ]
+        mock_cmd.side_effect = git_cmd_side_effect(rules)
 
         result = commit_and_create_pr(store, task, "/tmp/wt")
         assert result == "https://github.com/user/repo/pull/99"
@@ -113,11 +72,11 @@ class TestCommitAndCreatePr:
     def test_no_changes_skips_pr_url(self, mock_cmd, tmp_tasks):
         from src.pr import NO_CHANGES_SENTINEL, commit_and_create_pr
 
-        store = self._make_store(tmp_tasks)
+        store = attach_pr_mocks(tmp_tasks)
         task = tmp_tasks.create(title="Clean task", target_repo="task-forge")
 
         # Worktree is clean
-        mock_cmd.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mock_cmd.return_value = mock_process()
 
         result = commit_and_create_pr(store, task, "/tmp/wt")
         assert result == NO_CHANGES_SENTINEL
@@ -128,29 +87,18 @@ class TestCommitAndCreatePr:
     def test_push_failed_skips_pr_url(self, mock_cmd, mock_sensitive, tmp_tasks):
         from src.pr import PUSH_FAILED_SENTINEL, commit_and_create_pr
 
-        store = self._make_store(tmp_tasks)
+        store = attach_pr_mocks(tmp_tasks)
         task = tmp_tasks.create(title="Push fail", target_repo="task-forge")
 
-        call_count = {"n": 0}
-
-        def side_effect(cmd, cwd=None, timeout=None):
-            call_count["n"] += 1
-            joined = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd)
-            if "status --porcelain" in joined:
-                return MagicMock(returncode=0, stdout="M file.py", stderr="")
-            if "add -A" in joined:
-                return MagicMock(returncode=0, stdout="", stderr="")
-            if "diff --cached --name-only" in joined:
-                return MagicMock(returncode=0, stdout="", stderr="")
-            if "commit -m" in joined:
-                return MagicMock(returncode=0, stdout="", stderr="")
-            if "rev-parse --abbrev-ref HEAD" in joined:
-                return MagicMock(returncode=0, stdout="task/abc-test", stderr="")
-            if "push -u" in joined:
-                return MagicMock(returncode=1, stdout="", stderr="push failed")
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        mock_cmd.side_effect = side_effect
+        rules = [
+            ("status --porcelain", mock_process(stdout="M file.py")),
+            ("add -A", mock_process()),
+            ("diff --cached --name-only", mock_process()),
+            ("commit -m", mock_process()),
+            ("rev-parse --abbrev-ref HEAD", mock_process(stdout="task/abc-test")),
+            ("push -u", mock_process(returncode=1, stderr="push failed")),
+        ]
+        mock_cmd.side_effect = git_cmd_side_effect(rules)
 
         result = commit_and_create_pr(store, task, "/tmp/wt")
         assert result == PUSH_FAILED_SENTINEL

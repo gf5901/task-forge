@@ -32,6 +32,27 @@ def test_last_log_timestamp_fallback_line(tmp_path):
     assert out
 
 
+def test_last_log_timestamp_uses_last_non_json_line(tmp_path):
+    p = tmp_path / "mixed.log"
+    p.write_text("older-line\nlast-line-plain\n")
+    assert _last_log_timestamp(p) == "last-line-plain"
+
+
+def test_last_log_timestamp_skips_frontmatter_dashes(tmp_path):
+    p = tmp_path / "fm.log"
+    p.write_text("---\nuse-this-line\n")
+    out = _last_log_timestamp(p)
+    assert "use-this" in out
+
+
+def test_last_log_timestamp_open_oserror(tmp_path, monkeypatch):
+    def boom(*_a, **_kw):
+        raise OSError("denied")
+
+    monkeypatch.setattr("builtins.open", boom)
+    assert _last_log_timestamp(tmp_path / "any.log") == ""
+
+
 def test_api_health(monkeypatch):
     monkeypatch.setattr("src.web.store", MagicMock(list_tasks=lambda: []))
     client = TestClient(app)
@@ -50,3 +71,14 @@ def test_api_health(monkeypatch):
         "failed",
         "cancelled",
     }
+
+
+def test_api_health_survives_store_error(monkeypatch):
+    def boom():
+        raise RuntimeError("ddb")
+
+    monkeypatch.setattr("src.web.store", MagicMock(list_tasks=boom))
+    client = TestClient(app)
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    assert r.json()["task_counts"] == {}
