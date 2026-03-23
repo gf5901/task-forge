@@ -249,6 +249,71 @@ def _wait_for_pr_ci(pr_number, cwd, timeout=CI_CHECK_TIMEOUT):
     return True
 
 
+REPLY_CI_TIMEOUT = int(os.getenv("REPLY_CI_TIMEOUT", "180"))
+
+
+def poll_ci_status(pr_number, cwd, timeout=REPLY_CI_TIMEOUT):
+    # type: (str, str, int) -> tuple
+    """Poll CI checks on a PR and return (passed, summary_markdown).
+
+    Similar to _wait_for_pr_ci but returns a human-readable summary suitable
+    for saving to the task record.  Uses a shorter default timeout since this
+    is called from comment-reply context, not the initial PR creation.
+
+    Returns:
+      (True,  "All CI checks **passed** …")
+      (False, "CI checks **failed**: `build`, `lint`")
+      (True,  None)   — no checks found or gh error (nothing to report)
+    """
+    import json as _json
+    import time as _time
+
+    log.info("Polling CI status on PR #%s (timeout=%ds)", pr_number, timeout)
+    deadline = _time.monotonic() + timeout
+
+    _time.sleep(10)
+
+    while _time.monotonic() < deadline:
+        checks = _run_cmd(
+            [GH_BIN, "pr", "checks", pr_number, "--json", "state,name,conclusion"],
+            cwd=cwd,
+            timeout=30,
+        )
+        if checks.returncode != 0:
+            return True, None
+
+        try:
+            items = _json.loads(checks.stdout or "[]")
+        except ValueError:
+            _time.sleep(10)
+            continue
+
+        if not items:
+            return True, None
+
+        pending = [
+            c
+            for c in items
+            if c.get("state") not in ("SUCCESS", "FAILURE", "ERROR", "CANCELLED", "SKIPPED")
+        ]
+        if pending:
+            _time.sleep(15)
+            continue
+
+        failed = [c for c in items if c.get("state") in ("FAILURE", "ERROR")]
+        if failed:
+            names = ", ".join("`%s`" % c.get("name", "?") for c in failed)
+            summary = "CI checks **failed** on PR #%s: %s" % (pr_number, names)
+            log.warning("CI failed on PR #%s: %s", pr_number, [c.get("name") for c in failed])
+            return False, summary
+
+        log.info("All CI checks passed on PR #%s", pr_number)
+        return True, "All CI checks **passed** on PR #%s" % pr_number
+
+    log.warning("Timed out polling CI on PR #%s after %ds", pr_number, timeout)
+    return True, "CI checks still running on PR #%s (timed out after %ds)" % (pr_number, timeout)
+
+
 def commit_and_create_pr(store, task, wt_path):
     # type: (Any, Any, str) -> Optional[str]
     """Compound step: commit all changes in the worktree and open a PR.

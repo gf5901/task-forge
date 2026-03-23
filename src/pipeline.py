@@ -176,14 +176,19 @@ original work, so all your previous changes are present.
 ## Task
 **%s**
 %s
-
+%s
 ## Latest Comment (from %s)
 %s
 
 ## Your Instructions
 Respond to the comment above. If it asks you to do something, do it — you can read and edit \
 files in the worktree directly. If it asks a question, investigate and answer. If it provides \
-information, acknowledge it and take any appropriate action. Respond concisely."""
+information, acknowledge it and take any appropriate action.
+
+If this task has a connected PR and the comment asks you to fix CI failures, resolve merge \
+conflicts, or make other code changes, make those changes directly. After you finish, the \
+system will automatically commit any uncommitted changes and push them to update the PR. \
+Respond concisely."""
 )
 
 HUMAN_TASK_REPLY_PROMPT = (
@@ -685,6 +690,15 @@ def _get_or_create_reply_worktree(task):
 
     if _Path(wt_path).exists():
         log.info("Comment reply: reusing existing worktree at %s", wt_path)
+        # Pull latest from the remote so we don't work on stale code (e.g., if
+        # someone pushed a fix or GitHub suggestion commit directly on the PR).
+        pull = _run_cmd(["git", "pull", "--rebase", "--autostash"], cwd=wt_path, timeout=60)
+        if pull.returncode != 0:
+            log.warning(
+                "Comment reply: git pull --rebase failed in %s: %s",
+                wt_path,
+                pull.stderr[:200],
+            )
         return wt_path, False
 
     # Worktree was cleaned up after PR — try to re-create it on the task branch.
@@ -722,29 +736,88 @@ def _get_or_create_reply_worktree(task):
     return None, False
 
 
+def _check_and_save_ci(store, task, pr_url, wt_path):
+    # type: (DynamoTaskStore, Any, str, str) -> None
+    """Poll CI on a PR after a comment-reply push and save the result to the task."""
+    import re as _re
+
+    from .pr import poll_ci_status
+
+    pr_num_match = _re.search(r"/pull/(\d+)", pr_url)
+    if not pr_num_match:
+        return
+
+    pr_number = pr_num_match.group(1)
+    try:
+        passed, summary = poll_ci_status(pr_number, wt_path)
+    except Exception:
+        log.exception("Comment reply: CI status check failed for PR #%s", pr_number)
+        return
+
+    if summary:
+        _append_text_to_task(store, task, "CI Status", summary)
+        plog(
+            task.id,
+            "ci_passed" if passed else "ci_failed",
+            "pr",
+            summary,
+        )
+
+
 def _commit_reply_changes(store, task, wt_path):
     # type: (DynamoTaskStore, Any, str) -> None
-    """Commit and push any file changes the agent made during a comment reply.
+    """Commit and push any changes the agent made during a comment reply.
 
-    If the branch already has an open PR, the new commit appears there automatically.
-    If the branch is gone or push fails, we log a warning but don't raise — the
-    text reply was already saved.
+    Handles two cases:
+    1. Agent edited files but didn't commit — we commit + push.
+    2. Agent committed changes itself but didn't push — we detect unpushed
+       commits and push them.
+
+    If the branch already has an open PR, the push updates it automatically.
+    If no PR exists, we create one. Push/PR failures are logged but don't raise.
     """
-    from .pr import NO_CHANGES_SENTINEL, commit_and_create_pr
+    from .worktree import GH_BIN, _get_default_branch, _resolve_repo_dir
 
+    # Step 1: Commit any uncommitted changes the agent left in the worktree.
     status = _run_cmd(["git", "status", "--porcelain"], cwd=wt_path)
-    if not status.stdout.strip():
-        return
+    if status.stdout.strip():
+        log.info("Comment reply: agent left uncommitted changes in %s — committing", wt_path)
+        _run_cmd(["git", "add", "-A"], cwd=wt_path)
+        commit_msg = "task(%s): follow-up changes from comment reply" % task.id
+        commit = _run_cmd(["git", "commit", "-m", commit_msg], cwd=wt_path)
+        if commit.returncode != 0:
+            log.warning(
+                "Comment reply: commit failed for task %s: %s", task.id, commit.stderr[:200]
+            )
+            return
 
-    log.info("Comment reply: agent made file changes in %s — committing", wt_path)
-    _run_cmd(["git", "add", "-A"], cwd=wt_path)
-    commit_msg = "task(%s): follow-up changes from comment reply" % task.id
-    commit = _run_cmd(["git", "commit", "-m", commit_msg], cwd=wt_path)
-    if commit.returncode != 0:
-        log.warning("Comment reply: commit failed for task %s: %s", task.id, commit.stderr[:200])
-        return
-
+    # Step 2: Check for unpushed commits — the agent may have committed
+    # changes itself (e.g. via `git commit`) without pushing.
     branch = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=wt_path).stdout.strip()
+    unpushed = _run_cmd(
+        ["git", "log", "--oneline", "origin/%s..HEAD" % branch],
+        cwd=wt_path,
+    )
+    if unpushed.returncode != 0:
+        # origin/<branch> doesn't exist yet — all local commits are unpushed
+        has_unpushed = True
+    else:
+        has_unpushed = bool(unpushed.stdout.strip())
+
+    if not has_unpushed:
+        return
+
+    count = (
+        len(unpushed.stdout.strip().splitlines())
+        if unpushed.returncode == 0 and unpushed.stdout.strip()
+        else "?"
+    )
+    log.info("Comment reply: %s unpushed commit(s) for task %s — pushing", count, task.id)
+
+    # Rebase onto the remote branch first in case it advanced (e.g., manual push,
+    # GitHub suggestion commit, or a previous agent run that pushed directly).
+    _run_cmd(["git", "pull", "--rebase", "--autostash"], cwd=wt_path, timeout=60)
+
     push = _run_cmd(["git", "push", "-u", "origin", branch], cwd=wt_path, timeout=60)
     if push.returncode != 0:
         log.warning(
@@ -755,9 +828,7 @@ def _commit_reply_changes(store, task, wt_path):
         )
         return
 
-    # Check whether an open PR already exists for this branch.
-    from .worktree import GH_BIN
-
+    # Step 3: Check whether an open PR exists and update/create accordingly.
     pr_check = _run_cmd(
         [GH_BIN, "pr", "view", branch, "--json", "url,state", "--jq", '.url + " " + .state'],
         cwd=wt_path,
@@ -765,20 +836,54 @@ def _commit_reply_changes(store, task, wt_path):
     )
     if pr_check.returncode == 0 and "OPEN" in pr_check.stdout:
         pr_url = pr_check.stdout.strip().split()[0]
-        note = "Follow-up changes committed to existing PR: [%s](%s)" % (pr_url, pr_url)
+        note = "Follow-up changes pushed to existing PR: [%s](%s)" % (pr_url, pr_url)
         log.info("Comment reply: pushed follow-up commit to open PR %s", pr_url)
         store.set_pr_url(task.id, pr_url)
     else:
-        # No open PR — create one (covers merged PR + new edits, or fresh branch case).
-        pr_url = commit_and_create_pr(store, task, wt_path)
-        if pr_url and pr_url != NO_CHANGES_SENTINEL:
+        # No open PR — create one for the pushed branch.
+        try:
+            repo_dir = _resolve_repo_dir(task)
+            default_branch = _get_default_branch(repo_dir)
+        except Exception:
+            note = "Follow-up changes pushed to branch `%s`." % branch
+            _append_text_to_task(store, task, "PR Updated", note)
+            return
+
+        pr_title = "task(%s): %s" % (task.id, task.title)
+        pr_body = (
+            "Follow-up changes from comment reply.\n\n"
+            "**Task:** %s\n**Task ID:** `%s`" % (task.title, task.id)
+        )
+        pr = _run_cmd(
+            [
+                GH_BIN,
+                "pr",
+                "create",
+                "--title",
+                pr_title,
+                "--body",
+                pr_body,
+                "--base",
+                default_branch,
+            ],
+            cwd=wt_path,
+            timeout=60,
+        )
+        if pr.returncode == 0 and pr.stdout.strip():
+            pr_url = pr.stdout.strip()
             note = "Follow-up changes committed and new PR opened: [%s](%s)" % (pr_url, pr_url)
             log.info("Comment reply: opened new PR %s for follow-up changes", pr_url)
+            store.set_pr_url(task.id, pr_url)
         else:
-            note = "Follow-up changes committed to branch `%s` (no PR created)." % branch
-            log.info("Comment reply: committed changes to branch %s, PR creation skipped", branch)
+            note = "Follow-up changes pushed to branch `%s` (PR creation failed)." % branch
+            log.info("Comment reply: PR creation failed for branch %s", branch)
+            pr_url = None
 
-    _append_text_to_task(store, task, "PR Created", note)
+    _append_text_to_task(store, task, "PR Updated", note)
+
+    # Step 4: Poll CI status on the PR and save the result to the task record.
+    if pr_url:
+        _check_and_save_ci(store, task, pr_url, wt_path)
 
 
 def run_comment_reply(store, task_id):
@@ -821,6 +926,11 @@ def run_comment_reply(store, task_id):
     latest = user_comments[-1]
 
     desc_snippet = (task.description or "")[:500]
+    pr_url = store.get_pr_url(task_id)
+    if pr_url:
+        pr_section = "\n## Connected PR\nThis task has an open PR: %s\n" % pr_url
+    else:
+        pr_section = ""
     if is_human:
         prompt = HUMAN_TASK_REPLY_PROMPT % (
             task.title,
@@ -832,6 +942,7 @@ def run_comment_reply(store, task_id):
         prompt = COMMENT_REPLY_PROMPT % (
             task.title,
             desc_snippet,
+            pr_section,
             latest.author,
             latest.body,
         )
@@ -848,7 +959,7 @@ def run_comment_reply(store, task_id):
 
     try:
         if wt_path:
-            result, elapsed, _, usage = run_agent(
+            result, elapsed, sid, usage = run_agent(
                 prompt,
                 cwd=wt_path,
                 timeout=TASK_TIMEOUT,
@@ -858,12 +969,14 @@ def run_comment_reply(store, task_id):
             # No repo / worktree available (no target_repo, or task is in_progress).
             # Fall back to a tmpdir for a text-only reply.
             with tempfile.TemporaryDirectory(prefix="reply-%s-" % task_id) as reply_dir:
-                result, elapsed, _, usage = run_agent(
+                result, elapsed, sid, usage = run_agent(
                     prompt,
                     cwd=reply_dir,
                     timeout=TASK_TIMEOUT,
                     session_id=task.session_id or None,
                 )
+        if sid:
+            _save_session_id(task_id, sid)
         if result.returncode == 0 and result.stdout.strip():
             store.add_comment(task_id, "agent", _extract_agent_text(result.stdout))
             # Commit any file changes the agent made — only when we have a worktree
