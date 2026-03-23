@@ -1394,7 +1394,6 @@ class TestSubtaskStatusOnPr:
         tmp_tasks.update_status(parent.id, TaskStatus.IN_PROGRESS)
         parent = tmp_tasks.get(parent.id)
 
-        plan_json = '[{"title": "Step 1", "description": "Do A"}]'
         mock_agent.return_value = (
             subprocess.CompletedProcess(args=[], returncode=0, stdout="done"),
             10.0,
