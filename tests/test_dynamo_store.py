@@ -272,11 +272,6 @@ def test_deps_ready_and_find_dependents():
     assert found[0].id == "child"
 
 
-def test_list_tasks_for_project_empty():
-    store = _make_store(MagicMock())
-    assert store.list_tasks_for_project("") == []
-
-
 def test_maybe_finalize_directive_batch(monkeypatch):
     table = MagicMock()
     store = _make_store(table)
@@ -542,3 +537,11 @@ def test_add_comment_success():
     assert c is not None
     assert c.author == "me"
     table.put_item.assert_called_once()
+
+
+def test_list_tasks_for_project_empty_id_returns_empty(tmp_tasks):
+    assert tmp_tasks.list_tasks_for_project("") == []
+
+
+def test_list_human_reply_pending_empty_project_returns_empty(tmp_tasks):
+    assert tmp_tasks.list_human_reply_pending_for_project("") == []

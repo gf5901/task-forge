@@ -6,27 +6,8 @@ status codes, and response shapes — not just the underlying functions.
 Auth is disabled (AUTH_EMAIL/AUTH_PASSWORD unset in conftest).
 """
 
-import pytest
-from fastapi.testclient import TestClient
 
-import src.routers.tasks as tasks_router
-import src.web as web_mod
 from src.task_store import TaskStatus
-
-
-@pytest.fixture
-def client(tmp_tasks, monkeypatch):
-    """TestClient wired to a fresh DynamoTaskStore with no auth and no real runner."""
-    monkeypatch.setattr(tasks_router, "_get_store", lambda: tmp_tasks)
-    monkeypatch.setattr(web_mod, "trigger_runner", lambda task_id: None)
-    monkeypatch.setattr(web_mod, "cancel_runner", lambda task_id: None)
-    # Tests assume auth is off; host env may set AUTH_EMAIL/PASSWORD (setdefault in conftest
-    # does not override). Force-disable so /api/* returns 200, not 401.
-    monkeypatch.setattr(web_mod, "AUTH_ENABLED", False)
-    from src.web import app
-
-    return TestClient(app, raise_server_exceptions=True)
-
 
 # ---------------------------------------------------------------------------
 # GET /api/tasks

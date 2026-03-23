@@ -1,5 +1,7 @@
 """Tests for src/watcher.py — snapshot, callback dispatch."""
 
+import asyncio
+
 import pytest
 
 from src.task_store import TaskStatus
@@ -89,3 +91,30 @@ class TestCallbacks:
 
         watcher.on_status_change(bad_callback)
         await watcher._notify(task, TaskStatus.PENDING)
+
+
+class TestWatchLoop:
+    @pytest.mark.asyncio
+    async def test_start_continues_after_snapshot_error(self, tmp_tasks, monkeypatch):
+        """Poll loop logs and continues if _snapshot raises once."""
+        watcher = TaskWatcher(tmp_tasks, poll_interval=0.01)
+        n = {"calls": 0}
+        done = asyncio.Event()
+        real = watcher._snapshot
+
+        def flaky():
+            n["calls"] += 1
+            if n["calls"] == 2:
+                raise RuntimeError("ddb")
+            if n["calls"] >= 3:
+                watcher.stop()
+                done.set()
+            return real()
+
+        monkeypatch.setattr(watcher, "_snapshot", flaky)
+        tmp_tasks.create(title="loop")
+
+        run = asyncio.create_task(watcher.start())
+        await asyncio.wait_for(done.wait(), timeout=3.0)
+        await asyncio.wait_for(run, timeout=3.0)
+        assert n["calls"] >= 3

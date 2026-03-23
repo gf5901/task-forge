@@ -1,9 +1,13 @@
-"""Shared test fixtures."""
+"""Shared test fixtures.
+
+Reusable non-fixture helpers live in ``tests.support`` (mock git/PR helpers, etc.).
+"""
 
 import os
 
 import boto3
 import pytest
+from fastapi.testclient import TestClient
 from moto import mock_aws
 
 os.environ.setdefault("PIPELINE_LOG", "/tmp/test-pipeline.log")
@@ -71,6 +75,21 @@ def tmp_tasks():
 
 
 @pytest.fixture
+def client(tmp_tasks, monkeypatch):
+    """FastAPI TestClient with a fresh DynamoTaskStore; auth off; runner/cancel are no-ops."""
+    import src.routers.tasks as tasks_router
+    import src.web as web_mod
+
+    monkeypatch.setattr(tasks_router, "_get_store", lambda: tmp_tasks)
+    monkeypatch.setattr(web_mod, "trigger_runner", lambda task_id: None)
+    monkeypatch.setattr(web_mod, "cancel_runner", lambda task_id: None)
+    monkeypatch.setattr(web_mod, "AUTH_ENABLED", False)
+    from src.web import app
+
+    return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.fixture
 def tmp_log(tmp_path, monkeypatch):
     """Provide a temporary pipeline log path and patch the module."""
     log_path = tmp_path / "pipeline.log"
@@ -78,6 +97,6 @@ def tmp_log(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pl, "LOG_PATH", log_path)
     monkeypatch.setattr(pl, "_handler_attached", False)
-    monkeypatch.setattr(pl, "_dynamo_log_store", None)
+    monkeypatch.setattr(pl, "_dynamo_log_store", False)
     pl._pipeline_logger.handlers.clear()
     return log_path
