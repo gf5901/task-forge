@@ -191,6 +191,34 @@ system will automatically commit any uncommitted changes and push them to update
 Respond concisely."""
 )
 
+COMMENT_REPLY_TEXT_ONLY_PROMPT = (
+    SECURITY_PREFIX
+    + """\
+You are responding to a comment on a task you previously worked on. A user has posted a new \
+comment that requires your attention. Note: you do NOT have access to the code or git worktree \
+for this task — the worktree was cleaned up after the PR was created, and could not be \
+recreated. You can only provide a text response.
+
+## Task
+**%s**
+%s
+%s
+## Latest Comment (from %s)
+%s
+
+## Your Instructions
+Respond to the comment above with guidance, explanations, or next steps. Since you cannot \
+read or edit files directly, focus on:
+- Answering questions about the changes you made
+- Explaining your approach or reasoning
+- Suggesting specific commands or code changes the user can make manually
+- If the comment asks for code changes (CI fixes, merge conflicts, etc.), provide detailed \
+instructions the user can follow, or suggest re-running the task
+
+Do NOT claim you can edit files or that you have access to the worktree — you don't. \
+Respond concisely."""
+)
+
 HUMAN_TASK_REPLY_PROMPT = (
     SECURITY_PREFIX
     + """\
@@ -667,7 +695,7 @@ def run_directive(store, project_id, directive_sk):
     return True
 
 
-def _get_or_create_reply_worktree(task):
+def _get_or_create_reply_worktree(task, comment_body=""):
     # type: (...) -> tuple
     """Return (wt_path, created_fresh) for the task's worktree.
 
@@ -705,10 +733,22 @@ def _get_or_create_reply_worktree(task):
     try:
         repo_dir = _resolve_repo_dir(task)
     except Exception:
+        log.warning(
+            "Comment reply: cannot resolve repo dir for task %s (target_repo=%s) — "
+            "falling back to text-only reply",
+            task.id,
+            getattr(task, "target_repo", ""),
+        )
         return None, False
 
     try:
-        _run_cmd(["git", "fetch", "origin"], cwd=repo_dir, timeout=60)
+        fetch = _run_cmd(["git", "fetch", "origin"], cwd=repo_dir, timeout=60)
+        if fetch.returncode != 0:
+            log.warning(
+                "Comment reply: git fetch failed for task %s: %s",
+                task.id,
+                fetch.stderr[:200],
+            )
         slug = _slugify_branch(task.title)
         branch = "task/%s-%s" % (task.id, slug)
         WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
@@ -718,7 +758,16 @@ def _get_or_create_reply_worktree(task):
         )
         if result.returncode == 0:
             log.info("Comment reply: re-created worktree at %s on branch %s", wt_path, branch)
+            _maybe_rebase_for_merge_conflicts(wt_path, repo_dir, comment_body)
             return wt_path, True
+
+        log.info(
+            "Comment reply: worktree add on branch '%s' failed (rc=%d, stderr=%s) — "
+            "trying fresh branch from default",
+            branch,
+            result.returncode,
+            result.stderr[:200],
+        )
         # Branch doesn't exist remotely — fall back to default branch
         from .worktree import _get_default_branch
 
@@ -730,10 +779,51 @@ def _get_or_create_reply_worktree(task):
         if result2.returncode == 0:
             log.info("Comment reply: created fresh worktree at %s on %s", wt_path, default_branch)
             return wt_path, True
+
+        log.warning(
+            "Comment reply: all worktree creation attempts failed for task %s — "
+            "falling back to text-only reply (last stderr=%s)",
+            task.id,
+            result2.stderr[:200],
+        )
     except Exception:
-        log.exception("Comment reply: failed to create worktree for task %s", task.id)
+        log.exception(
+            "Comment reply: unexpected error creating worktree for task %s — "
+            "falling back to text-only reply",
+            task.id,
+        )
 
     return None, False
+
+
+def _maybe_rebase_for_merge_conflicts(wt_path, repo_dir, comment_body):
+    # type: (str, str, str) -> None
+    """If the comment mentions merge conflicts, attempt a rebase onto the base branch."""
+    if not comment_body:
+        return
+    lower = comment_body.lower()
+    conflict_keywords = ("merge conflict", "merge conflicts", "conflicts with", "cannot be merged")
+    if not any(kw in lower for kw in conflict_keywords):
+        return
+
+    from .worktree import _get_default_branch
+
+    default_branch = _get_default_branch(repo_dir)
+    log.info("Comment reply: comment mentions merge conflicts — attempting rebase onto %s", default_branch)
+    rebase = _run_cmd(
+        ["git", "rebase", "origin/%s" % default_branch],
+        cwd=wt_path,
+        timeout=120,
+    )
+    if rebase.returncode == 0:
+        log.info("Comment reply: rebase onto %s succeeded", default_branch)
+    else:
+        log.warning(
+            "Comment reply: rebase failed (rc=%d) — aborting rebase; agent will need to resolve manually. stderr=%s",
+            rebase.returncode,
+            rebase.stderr[:300],
+        )
+        _run_cmd(["git", "rebase", "--abort"], cwd=wt_path, timeout=15)
 
 
 def _check_and_save_ci(store, task, pr_url, wt_path):
@@ -931,22 +1021,6 @@ def run_comment_reply(store, task_id):
         pr_section = "\n## Connected PR\nThis task has an open PR: %s\n" % pr_url
     else:
         pr_section = ""
-    if is_human:
-        prompt = HUMAN_TASK_REPLY_PROMPT % (
-            task.title,
-            desc_snippet,
-            latest.author,
-            latest.body,
-        )
-    else:
-        prompt = COMMENT_REPLY_PROMPT % (
-            task.title,
-            desc_snippet,
-            pr_section,
-            latest.author,
-            latest.body,
-        )
-
     plog(task_id, "reply_start", "execute", "Responding to comment")
 
     # Human-assigned tasks (without a project — rare fallback) always get a
@@ -955,7 +1029,31 @@ def run_comment_reply(store, task_id):
         wt_path = None
         created_fresh = False
     else:
-        wt_path, created_fresh = _get_or_create_reply_worktree(task)
+        wt_path, created_fresh = _get_or_create_reply_worktree(task, comment_body=latest.body)
+
+    if is_human:
+        prompt = HUMAN_TASK_REPLY_PROMPT % (
+            task.title,
+            desc_snippet,
+            latest.author,
+            latest.body,
+        )
+    elif wt_path:
+        prompt = COMMENT_REPLY_PROMPT % (
+            task.title,
+            desc_snippet,
+            pr_section,
+            latest.author,
+            latest.body,
+        )
+    else:
+        prompt = COMMENT_REPLY_TEXT_ONLY_PROMPT % (
+            task.title,
+            desc_snippet,
+            pr_section,
+            latest.author,
+            latest.body,
+        )
 
     try:
         if wt_path:
@@ -1276,7 +1374,7 @@ def _run_one_inner(store, task):
 
             final_status = TaskStatus.IN_REVIEW if pr_created else TaskStatus.COMPLETED
             for sub in subtasks:
-                store.update_status(sub.id, final_status)
+                store.update_status(sub.id, TaskStatus.COMPLETED)
             store.update_status(task.id, final_status)
             _notify_pm_chat_task_terminal(
                 task,
