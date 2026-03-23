@@ -1,7 +1,9 @@
 """Tests for runner helper functions — prompts, slugs, model resolution, appending."""
 
+import json
 import os
 import subprocess
+from unittest.mock import patch
 
 from src.task_store import Task, TaskPriority, TaskStatus
 
@@ -973,7 +975,7 @@ class TestCommentReply:
         # Stub worktree helper so it would return a path if not blocked
         monkeypatch.setattr(
             "src.pipeline._get_or_create_reply_worktree",
-            lambda task: ("/tmp/fake-wt", False),
+            lambda task, comment_body="": ("/tmp/fake-wt", False),
         )
 
         task = tmp_tasks.create(title="T")
@@ -1005,7 +1007,7 @@ class TestCommentReply:
         )
         monkeypatch.setattr(
             "src.pipeline._get_or_create_reply_worktree",
-            lambda task: ("/tmp/fake-wt", False),
+            lambda task, comment_body="": ("/tmp/fake-wt", False),
         )
 
         task = tmp_tasks.create(title="T")
@@ -1027,7 +1029,7 @@ class TestCommentReply:
         monkeypatch.setattr("src.pipeline._commit_reply_changes", lambda *a, **kw: None)
         monkeypatch.setattr(
             "src.pipeline._get_or_create_reply_worktree",
-            lambda task: ("/tmp/fake-wt", True),  # created_fresh=True
+            lambda task, comment_body="": ("/tmp/fake-wt", True),  # created_fresh=True
         )
 
         cleanup_calls = []
@@ -1055,7 +1057,7 @@ class TestCommentReply:
         monkeypatch.setattr("src.pipeline._commit_reply_changes", lambda *a, **kw: None)
         monkeypatch.setattr(
             "src.pipeline._get_or_create_reply_worktree",
-            lambda task: ("/tmp/fake-wt", False),  # created_fresh=False
+            lambda task, comment_body="": ("/tmp/fake-wt", False),  # created_fresh=False
         )
 
         cleanup_calls = []
@@ -1228,3 +1230,296 @@ class TestCancelViaStatusUpdate:
             endpoint_update_status(task.id, StatusBody(status="nonsense"))
         )
         assert response.status_code == 400
+
+
+class TestTextOnlyCommentReply:
+    """When the worktree cannot be recreated, the agent gets a text-only prompt."""
+
+    def _set_reply_pending(self, tmp_tasks, task_id):
+        tmp_tasks.set_reply_pending(task_id, True)
+
+    def test_text_only_prompt_when_worktree_returns_none(self, tmp_tasks, monkeypatch):
+        """If _get_or_create_reply_worktree returns None, use COMMENT_REPLY_TEXT_ONLY_PROMPT."""
+        from src.pipeline import run_comment_reply
+
+        captured = {}
+
+        def capture_agent(prompt, **kw):
+            import subprocess as _sp
+
+            captured["prompt"] = prompt
+            captured["cwd"] = kw.get("cwd")
+            fake = _sp.CompletedProcess(args=[], returncode=0, stdout="text reply", stderr="")
+            return fake, 1.0, "", {}
+
+        monkeypatch.setattr("src.pipeline.run_agent", capture_agent)
+        monkeypatch.setattr(
+            "src.pipeline._get_or_create_reply_worktree",
+            lambda task, comment_body="": (None, False),
+        )
+
+        task = tmp_tasks.create(title="My broken task", description="Some desc")
+        tmp_tasks.add_comment(task.id, "web", "Why is CI failing?")
+        self._set_reply_pending(tmp_tasks, task.id)
+
+        result = run_comment_reply(tmp_tasks, task.id)
+
+        assert result is True
+        assert "you do NOT have access to the code" in captured["prompt"]
+        assert "same git worktree" not in captured["prompt"]
+        assert "My broken task" in captured["prompt"]
+        assert "Why is CI failing?" in captured["prompt"]
+
+    def test_code_access_prompt_when_worktree_exists(self, tmp_tasks, monkeypatch):
+        """If _get_or_create_reply_worktree returns a path, use the standard prompt."""
+        from src.pipeline import run_comment_reply
+
+        captured = {}
+
+        def capture_agent(prompt, **kw):
+            import subprocess as _sp
+
+            captured["prompt"] = prompt
+            fake = _sp.CompletedProcess(args=[], returncode=0, stdout="code reply", stderr="")
+            return fake, 1.0, "", {}
+
+        monkeypatch.setattr("src.pipeline.run_agent", capture_agent)
+        monkeypatch.setattr("src.pipeline._commit_reply_changes", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "src.pipeline._get_or_create_reply_worktree",
+            lambda task, comment_body="": ("/tmp/fake-wt", False),
+        )
+
+        task = tmp_tasks.create(title="Good task", description="Works fine")
+        tmp_tasks.add_comment(task.id, "web", "Please fix this")
+        self._set_reply_pending(tmp_tasks, task.id)
+
+        result = run_comment_reply(tmp_tasks, task.id)
+
+        assert result is True
+        assert "same git worktree" in captured["prompt"]
+        assert "do NOT have access" not in captured["prompt"]
+
+
+class TestSubtaskStatusOnPr:
+    """Child subtasks always get completed, only the parent gets in_review."""
+
+    @patch("src.pipeline._notify_pm_chat_task_terminal")
+    @patch("src.pipeline.trigger_unblocked_dependents")
+    @patch("src.pipeline._maybe_finalize_directive_batch")
+    @patch("src.pipeline.commit_and_create_pr")
+    @patch("src.pipeline.run_agent")
+    @patch("src.pipeline.create_worktree", return_value="/tmp/wt")
+    @patch("src.pipeline.ensure_repo")
+    @patch("src.pipeline.cleanup_worktree")
+    @patch("src.pipeline.plog")
+    def test_subtasks_completed_when_parent_gets_in_review(
+        self,
+        mock_plog,
+        mock_cleanup,
+        mock_ensure,
+        mock_create_wt,
+        mock_agent,
+        mock_pr,
+        mock_finalize,
+        mock_unblock,
+        mock_notify,
+        tmp_tasks,
+        monkeypatch,
+    ):
+        from src.pipeline import _run_one_inner
+
+        parent = tmp_tasks.create(
+            title="Parent task",
+            priority="high",
+            description="Step one: build the frontend. Then deploy. After that run integration tests.",
+        )
+        tmp_tasks.update_status(parent.id, TaskStatus.IN_PROGRESS)
+        parent = tmp_tasks.get(parent.id)
+
+        plan_json = (
+            '[{"title": "Step 1", "description": "Do A"}, '
+            '{"title": "Step 2", "description": "Do B"}]'
+        )
+        mock_agent.return_value = (
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="done"),
+            10.0,
+            "",
+            {},
+        )
+        mock_pr.return_value = "https://github.com/user/repo/pull/42"
+
+        monkeypatch.setattr("src.pipeline.AUTO_PLAN", True)
+        monkeypatch.setattr("src.pipeline.AUTO_DOCS", False)
+        monkeypatch.setattr("src.pipeline.AUTO_PR", True)
+        monkeypatch.setattr("src.pipeline._resolve_model", lambda t: None)
+        monkeypatch.setattr("src.pipeline.plan_task", lambda s, t, cwd=None: json.loads(plan_json))
+
+        _run_one_inner(tmp_tasks, parent)
+
+        parent_updated = tmp_tasks.get(parent.id)
+        assert parent_updated.status == TaskStatus.IN_REVIEW
+
+        subtasks = tmp_tasks.list_subtasks(parent.id)
+        assert len(subtasks) == 2
+        for sub in subtasks:
+            assert sub.status == TaskStatus.COMPLETED
+
+    @patch("src.pipeline._notify_pm_chat_task_terminal")
+    @patch("src.pipeline.trigger_unblocked_dependents")
+    @patch("src.pipeline._maybe_finalize_directive_batch")
+    @patch("src.pipeline.commit_and_create_pr")
+    @patch("src.pipeline.run_agent")
+    @patch("src.pipeline.create_worktree", return_value="/tmp/wt")
+    @patch("src.pipeline.ensure_repo")
+    @patch("src.pipeline.cleanup_worktree")
+    @patch("src.pipeline.plog")
+    def test_subtasks_completed_when_no_pr(
+        self,
+        mock_plog,
+        mock_cleanup,
+        mock_ensure,
+        mock_create_wt,
+        mock_agent,
+        mock_pr,
+        mock_finalize,
+        mock_unblock,
+        mock_notify,
+        tmp_tasks,
+        monkeypatch,
+    ):
+        from src.pipeline import _run_one_inner
+
+        parent = tmp_tasks.create(title="No PR task", priority="high")
+        tmp_tasks.update_status(parent.id, TaskStatus.IN_PROGRESS)
+        parent = tmp_tasks.get(parent.id)
+
+        mock_agent.return_value = (
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="done"),
+            10.0,
+            "",
+            {},
+        )
+        mock_pr.return_value = None
+
+        monkeypatch.setattr("src.pipeline.AUTO_PLAN", False)
+        monkeypatch.setattr("src.pipeline.AUTO_DOCS", False)
+        monkeypatch.setattr("src.pipeline.AUTO_PR", True)
+        monkeypatch.setattr("src.pipeline._resolve_model", lambda t: None)
+
+        _run_one_inner(tmp_tasks, parent)
+
+        parent_updated = tmp_tasks.get(parent.id)
+        assert parent_updated.status == TaskStatus.COMPLETED
+
+
+class TestGetOrCreateReplyWorktree:
+    """Tests for _get_or_create_reply_worktree worktree recreation logic."""
+
+    def test_returns_none_when_in_progress(self, tmp_tasks):
+        from src.pipeline import _get_or_create_reply_worktree
+
+        task = tmp_tasks.create(title="Running task")
+        tmp_tasks.update_status(task.id, TaskStatus.IN_PROGRESS)
+        task = tmp_tasks.get(task.id)
+
+        wt_path, created = _get_or_create_reply_worktree(task)
+        assert wt_path is None
+        assert created is False
+
+    def test_attempts_branch_recreation(self, tmp_tasks, monkeypatch):
+        """When the worktree doesn't exist, it attempts to re-create on the task branch."""
+        from unittest.mock import MagicMock
+
+        from src.pipeline import _get_or_create_reply_worktree
+
+        task = tmp_tasks.create(title="Test task", target_repo="my-repo")
+        tmp_tasks.update_status(task.id, TaskStatus.IN_REVIEW)
+        task = tmp_tasks.get(task.id)
+
+        cmd_calls = []
+        success = MagicMock(returncode=0, stdout="", stderr="")
+
+        def track_cmd(cmd, cwd=None, timeout=None):
+            cmd_calls.append(cmd)
+            return success
+
+        monkeypatch.setattr("src.pipeline._run_cmd", track_cmd)
+        monkeypatch.setattr("src.pipeline._resolve_repo_dir", lambda t: "/fake/repo")
+        monkeypatch.setattr("src.pipeline.WORKTREE_BASE", MagicMock())
+        monkeypatch.setattr("src.pipeline.WORKTREE_BASE.__truediv__", lambda s, x: "/tmp/task-worktrees/" + x)
+
+        import pathlib
+
+        monkeypatch.setattr(pathlib.Path, "exists", lambda self: False)
+
+        wt_path, created = _get_or_create_reply_worktree(task)
+
+        git_cmds = [c for c in cmd_calls if "worktree" in str(c)]
+        assert len(git_cmds) >= 1
+        assert "add" in str(git_cmds[0])
+
+    def test_passes_comment_body_for_rebase(self, tmp_tasks, monkeypatch):
+        """Comment body mentioning merge conflicts triggers rebase attempt."""
+        from unittest.mock import MagicMock
+
+        from src.pipeline import _maybe_rebase_for_merge_conflicts
+
+        rebase_calls = []
+        success = MagicMock(returncode=0, stdout="", stderr="")
+
+        def track_cmd(cmd, cwd=None, timeout=None):
+            rebase_calls.append(cmd)
+            return success
+
+        monkeypatch.setattr("src.pipeline._run_cmd", track_cmd)
+        monkeypatch.setattr(
+            "src.worktree._get_default_branch",
+            lambda repo: "main",
+        )
+
+        _maybe_rebase_for_merge_conflicts("/tmp/wt", "/fake/repo", "There are merge conflicts in this PR")
+
+        rebase_cmd = [c for c in rebase_calls if "rebase" in str(c)]
+        assert len(rebase_cmd) == 1
+        assert "origin/main" in str(rebase_cmd[0])
+
+    def test_no_rebase_without_conflict_keywords(self, tmp_tasks, monkeypatch):
+        """No rebase attempted if comment doesn't mention conflicts."""
+        from unittest.mock import MagicMock
+
+        from src.pipeline import _maybe_rebase_for_merge_conflicts
+
+        rebase_calls = []
+
+        def track_cmd(cmd, cwd=None, timeout=None):
+            rebase_calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("src.pipeline._run_cmd", track_cmd)
+
+        _maybe_rebase_for_merge_conflicts("/tmp/wt", "/fake/repo", "Please fix the typo")
+
+        assert len(rebase_calls) == 0
+
+    def test_rebase_abort_on_failure(self, tmp_tasks, monkeypatch):
+        """If rebase fails, it runs git rebase --abort."""
+        from unittest.mock import MagicMock
+
+        from src.pipeline import _maybe_rebase_for_merge_conflicts
+
+        cmd_calls = []
+
+        def track_cmd(cmd, cwd=None, timeout=None):
+            cmd_calls.append(cmd)
+            if "rebase" in str(cmd) and "--abort" not in str(cmd):
+                return MagicMock(returncode=1, stdout="", stderr="CONFLICT in file.py")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("src.pipeline._run_cmd", track_cmd)
+        monkeypatch.setattr("src.worktree._get_default_branch", lambda repo: "main")
+
+        _maybe_rebase_for_merge_conflicts("/tmp/wt", "/fake/repo", "merge conflicts need resolving")
+
+        abort_calls = [c for c in cmd_calls if "--abort" in str(c)]
+        assert len(abort_calls) == 1

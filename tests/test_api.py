@@ -20,6 +20,9 @@ def client(tmp_tasks, monkeypatch):
     monkeypatch.setattr(tasks_router, "_get_store", lambda: tmp_tasks)
     monkeypatch.setattr(web_mod, "trigger_runner", lambda task_id: None)
     monkeypatch.setattr(web_mod, "cancel_runner", lambda task_id: None)
+    # Tests assume auth is off; host env may set AUTH_EMAIL/PASSWORD (setdefault in conftest
+    # does not override). Force-disable so /api/* returns 200, not 401.
+    monkeypatch.setattr(web_mod, "AUTH_ENABLED", False)
     from src.web import app
 
     return TestClient(app, raise_server_exceptions=True)
